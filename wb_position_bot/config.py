@@ -36,6 +36,7 @@ class Config:
     wb_request_retries: int
     wb_429_cooldown_seconds: float
     wb_proxy_url: str
+    wb_proxy_insecure_ssl: bool
     request_timeout: float
 
 
@@ -81,6 +82,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_config(require_telegram: bool = True) -> Config:
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -106,5 +114,6 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_request_retries=_int_env("WB_REQUEST_RETRIES", 2, minimum=1),
         wb_429_cooldown_seconds=_float_env("WB_429_COOLDOWN_SECONDS", 15.0),
         wb_proxy_url=os.getenv("WB_PROXY_URL", "").strip(),
+        wb_proxy_insecure_ssl=_bool_env("WB_PROXY_INSECURE_SSL", False),
         request_timeout=_float_env("REQUEST_TIMEOUT", 25.0),
     )

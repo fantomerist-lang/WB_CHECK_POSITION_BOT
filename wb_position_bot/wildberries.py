@@ -4,6 +4,7 @@ import http.cookiejar
 import json
 import random
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -49,6 +50,7 @@ class WildberriesClient:
         retries: int = 3,
         rate_limit_cooldown_seconds: float = 15.0,
         proxy_url: str = "",
+        proxy_insecure_ssl: bool = False,
     ) -> None:
         self.dest = dest
         self.currency = currency
@@ -60,7 +62,7 @@ class WildberriesClient:
         self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
         self._last_request_at = 0.0
         self.cookie_jar = http.cookiejar.CookieJar()
-        self.opener = build_opener(proxy_url, self.cookie_jar)
+        self.opener = build_opener(proxy_url, self.cookie_jar, proxy_insecure_ssl)
         self._warmed_up = False
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
@@ -194,11 +196,14 @@ class WildberriesClient:
 def build_opener(
     proxy_url: str = "",
     cookie_jar: http.cookiejar.CookieJar | None = None,
+    insecure_ssl: bool = False,
 ) -> urllib.request.OpenerDirector:
     proxy = str(proxy_url or "").strip()
     handlers: list[urllib.request.BaseHandler] = []
     if cookie_jar is not None:
         handlers.append(urllib.request.HTTPCookieProcessor(cookie_jar))
+    if insecure_ssl or "unblock.decodo.com" in proxy:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
     if not proxy:
         return urllib.request.build_opener(*handlers)
     handlers.append(
