@@ -32,6 +32,7 @@ class Config:
     wb_locale: str
     wb_max_search_pages: int
     wb_request_delay_seconds: float
+    wb_request_delay_jitter_seconds: float
     wb_request_retries: int
     wb_429_cooldown_seconds: float
     wb_proxy_url: str
@@ -100,8 +101,9 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_currency=os.getenv("WB_CURRENCY", "rub").strip(),
         wb_locale=os.getenv("WB_LOCALE", "ru").strip(),
         wb_max_search_pages=_int_env("WB_MAX_SEARCH_PAGES", 20, minimum=1),
-        wb_request_delay_seconds=_float_env("WB_REQUEST_DELAY_SECONDS", 4.0),
-        wb_request_retries=_int_env("WB_REQUEST_RETRIES", 6, minimum=1),
+        wb_request_delay_seconds=_float_env("WB_REQUEST_DELAY_SECONDS", 2.0),
+        wb_request_delay_jitter_seconds=_float_env("WB_REQUEST_DELAY_JITTER_SECONDS", 3.0),
+        wb_request_retries=_int_env("WB_REQUEST_RETRIES", 2, minimum=1),
         wb_429_cooldown_seconds=_float_env("WB_429_COOLDOWN_SECONDS", 15.0),
         wb_proxy_url=os.getenv("WB_PROXY_URL", "").strip(),
         request_timeout=_float_env("REQUEST_TIMEOUT", 25.0),

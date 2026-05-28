@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import socket
 import time
 import urllib.error
@@ -26,6 +27,15 @@ SEARCH_ENDPOINTS = (
 )
 
 
+USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+)
+
+
 class WildberriesClient:
     def __init__(
         self,
@@ -34,6 +44,7 @@ class WildberriesClient:
         locale: str = "ru",
         timeout: float = 25.0,
         request_delay_seconds: float = 0.8,
+        request_delay_jitter_seconds: float = 0.0,
         retries: int = 3,
         rate_limit_cooldown_seconds: float = 15.0,
         proxy_url: str = "",
@@ -43,6 +54,7 @@ class WildberriesClient:
         self.locale = locale
         self.timeout = timeout
         self.request_delay_seconds = max(float(request_delay_seconds or 0), 0.0)
+        self.request_delay_jitter_seconds = max(float(request_delay_jitter_seconds or 0), 0.0)
         self.retries = max(int(retries or 1), 1)
         self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
         self._last_request_at = 0.0
@@ -80,24 +92,11 @@ class WildberriesClient:
 
     def _get_json(self, endpoint: str, params: dict[str, str]) -> dict[str, Any]:
         url = endpoint + "?" + urllib.parse.urlencode(params)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json,text/plain,*/*",
-                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-                "Origin": "https://www.wildberries.ru",
-                "Referer": "https://www.wildberries.ru/",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0 Safari/537.36"
-                ),
-            },
-        )
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             self._wait_for_slot()
             try:
+                request = self._request(url)
                 with self.opener.open(request, timeout=self.timeout) as response:
                     raw = response.read().decode("utf-8", errors="replace")
                 break
@@ -130,14 +129,29 @@ class WildberriesClient:
             raise WildberriesError("WB вернул не JSON") from error
 
     def _wait_for_slot(self) -> None:
-        if self.request_delay_seconds <= 0:
+        delay = self.request_delay_seconds
+        if self.request_delay_jitter_seconds > 0:
+            delay += random.uniform(0, self.request_delay_jitter_seconds)
+        if delay <= 0:
             self._last_request_at = time.monotonic()
             return
         now = time.monotonic()
-        wait_for = self.request_delay_seconds - (now - self._last_request_at)
+        wait_for = delay - (now - self._last_request_at)
         if wait_for > 0:
             time.sleep(wait_for)
         self._last_request_at = time.monotonic()
+
+    def _request(self, url: str) -> urllib.request.Request:
+        return urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json,text/plain,*/*",
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+                "Origin": "https://www.wildberries.ru",
+                "Referer": "https://www.wildberries.ru/",
+                "User-Agent": random.choice(USER_AGENTS),
+            },
+        )
 
     def _rate_limit_wait_seconds(self, error: urllib.error.HTTPError, attempt: int) -> float:
         retry_after = error.headers.get("Retry-After") if error.headers else None
