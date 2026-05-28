@@ -28,6 +28,13 @@ SEARCH_ENDPOINTS = (
     "https://search.wb.ru/exactmatch/ru/common/v13/search",
     "https://search.wb.ru/exactmatch/ru/common/v12/search",
     "https://search.wb.ru/exactmatch/ru/common/v11/search",
+    "https://search.wb.ru/exactmatch/ru/common/v10/search",
+    "https://search.wb.ru/exactmatch/ru/common/v9/search",
+    "https://search.wb.ru/exactmatch/ru/common/v8/search",
+    "https://search.wb.ru/exactmatch/ru/common/v7/search",
+    "https://search.wb.ru/exactmatch/ru/common/v6/search",
+    "https://search.wb.ru/exactmatch/ru/common/v5/search",
+    "https://search.wb.ru/exactmatch/ru/common/v4/search",
 )
 
 
@@ -253,62 +260,91 @@ def timeout_or_network_error_message(error: Exception, timeout: float) -> str:
 
 
 def parse_json_response(raw: str) -> dict[str, Any]:
+    text = str(raw or "").lstrip("\ufeff")
+    if has_not_found_marker(text) and not has_product_marker(text):
+        raise WildberriesError("endpoint WB вернул Not Found без списка товаров")
+
+    for candidate in json_candidates(text):
+        value = try_decode_json(candidate)
+        if isinstance(value, dict):
+            return value
+
+    raise WildberriesError(f"WB вернул не JSON: {response_preview(text)}")
+
+
+def json_candidates(text: str) -> list[str]:
+    candidates = [text]
+    marker_pos = not_found_marker_pos(text)
+    if marker_pos >= 0:
+        repaired = repair_json_prefix(text[:marker_pos])
+        if repaired:
+            candidates.append(repaired)
+    return candidates
+
+
+def try_decode_json(text: str) -> Any:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return None
     try:
-        value = json.loads(raw)
+        return json.loads(candidate, strict=False)
     except json.JSONDecodeError:
-        value = decode_first_json_object(raw)
-    if isinstance(value, dict):
-        return value
-    raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+        pass
 
-
-def decode_first_json_object(raw: str) -> dict[str, Any]:
-    text = str(raw or "")
-    start = text.find("{")
+    start = candidate.find("{")
     if start < 0:
-        raise WildberriesError(f"WB вернул не JSON: {response_preview(raw)}")
-    decoder = json.JSONDecoder()
+        return None
     try:
-        value, _ = decoder.raw_decode(text[start:])
-    except json.JSONDecodeError as error:
-        raise WildberriesError(f"WB вернул не JSON: {response_preview(raw)}") from error
-    if not isinstance(value, dict):
-        raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+        value, _ = json.JSONDecoder(strict=False).raw_decode(candidate[start:])
+    except json.JSONDecodeError:
+        return None
     return value
 
 
-def parse_json_response(raw: str) -> dict[str, Any]:
-    text = str(raw or "").lstrip("\ufeff")
-    try:
-        value = json.loads(text, strict=False)
-    except json.JSONDecodeError:
-        value = decode_first_json_object(text)
-    if isinstance(value, dict):
-        return value
-    raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+def repair_json_prefix(text: str) -> str:
+    candidate = str(text or "").strip().rstrip(",")
+    if not candidate:
+        return ""
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in candidate:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append("}")
+        elif char == "[":
+            stack.append("]")
+        elif char in ("}", "]") and stack and stack[-1] == char:
+            stack.pop()
+
+    if in_string:
+        candidate += '"'
+    return candidate + "".join(reversed(stack))
 
 
-def decode_first_json_object(raw: str) -> dict[str, Any]:
-    text = str(raw or "").lstrip("\ufeff")
-    start = text.find("{")
-    if start < 0:
-        raise WildberriesError(f"WB вернул не JSON: {response_preview(raw)}")
-    decoder = json.JSONDecoder(strict=False)
-    try:
-        value, _ = decoder.raw_decode(text[start:])
-    except json.JSONDecodeError as error:
-        raise WildberriesError(f"WB вернул не JSON: {json_error_preview(text, start + error.pos)}") from error
-    if not isinstance(value, dict):
-        raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
-    return value
+def has_not_found_marker(text: str) -> bool:
+    return not_found_marker_pos(text) >= 0
 
 
-def json_error_preview(raw: str, error_pos: int, window: int = 90) -> str:
-    text = str(raw or "")
-    left = max(error_pos - window, 0)
-    right = min(error_pos + window, len(text))
-    snippet = response_preview(text[left:right], limit=window * 2)
-    return f"позиция {error_pos}: {snippet}"
+def not_found_marker_pos(text: str) -> int:
+    lower = str(text or "").lower()
+    positions = [pos for pos in (lower.find("not found"), lower.find("ot found")) if pos >= 0]
+    return min(positions) if positions else -1
+
+
+def has_product_marker(text: str) -> bool:
+    lower = str(text or "").lower()
+    return '"products"' in lower or '"cards"' in lower or '"items"' in lower
 
 
 def extract_products(payload: dict[str, Any]) -> list[Any]:
