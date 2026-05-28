@@ -15,6 +15,10 @@ class WildberriesError(RuntimeError):
     pass
 
 
+class WildberriesRateLimitError(WildberriesError):
+    pass
+
+
 SEARCH_ENDPOINTS = (
     "https://search.wb.ru/exactmatch/ru/common/v13/search",
     "https://search.wb.ru/exactmatch/ru/common/v12/search",
@@ -31,6 +35,8 @@ class WildberriesClient:
         timeout: float = 25.0,
         request_delay_seconds: float = 0.8,
         retries: int = 3,
+        rate_limit_cooldown_seconds: float = 15.0,
+        proxy_url: str = "",
     ) -> None:
         self.dest = dest
         self.currency = currency
@@ -38,7 +44,9 @@ class WildberriesClient:
         self.timeout = timeout
         self.request_delay_seconds = max(float(request_delay_seconds or 0), 0.0)
         self.retries = max(int(retries or 1), 1)
+        self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
         self._last_request_at = 0.0
+        self.opener = build_opener(proxy_url)
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
         params = {
@@ -63,6 +71,8 @@ class WildberriesClient:
                 if not isinstance(products, list):
                     return []
                 return [parse_search_item(item) for item in products if isinstance(item, dict) and item.get("id")]
+            except WildberriesRateLimitError as error:
+                raise error
             except Exception as error:
                 last_error = error
                 continue
@@ -75,6 +85,8 @@ class WildberriesClient:
             headers={
                 "Accept": "application/json,text/plain,*/*",
                 "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+                "Origin": "https://www.wildberries.ru",
+                "Referer": "https://www.wildberries.ru/",
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -86,11 +98,19 @@ class WildberriesClient:
         for attempt in range(1, self.retries + 1):
             self._wait_for_slot()
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                with self.opener.open(request, timeout=self.timeout) as response:
                     raw = response.read().decode("utf-8", errors="replace")
                 break
             except urllib.error.HTTPError as error:
                 last_error = error
+                if error.code == 429:
+                    wait_seconds = self._rate_limit_wait_seconds(error, attempt)
+                    if attempt < self.retries:
+                        time.sleep(wait_seconds)
+                        continue
+                    raise WildberriesRateLimitError(
+                        f"HTTP 429: WB временно ограничил запросы. Подожди {int(wait_seconds)} сек или включи прокси."
+                    ) from error
                 if error.code in {403, 429, 500, 502, 503, 504} and attempt < self.retries:
                     time.sleep(min(2.0 * attempt, 8.0))
                     continue
@@ -118,6 +138,29 @@ class WildberriesClient:
         if wait_for > 0:
             time.sleep(wait_for)
         self._last_request_at = time.monotonic()
+
+    def _rate_limit_wait_seconds(self, error: urllib.error.HTTPError, attempt: int) -> float:
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if retry_after:
+            try:
+                return max(float(retry_after), self.rate_limit_cooldown_seconds)
+            except ValueError:
+                pass
+        return max(self.rate_limit_cooldown_seconds, min(10.0 * attempt, 60.0))
+
+
+def build_opener(proxy_url: str = "") -> urllib.request.OpenerDirector:
+    proxy = str(proxy_url or "").strip()
+    if not proxy:
+        return urllib.request.build_opener()
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(
+            {
+                "http": proxy,
+                "https": proxy,
+            }
+        )
+    )
 
 
 def parse_price(raw: Any) -> float | None:

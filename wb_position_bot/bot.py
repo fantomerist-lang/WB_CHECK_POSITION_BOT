@@ -49,6 +49,8 @@ def wb_client(context: ContextTypes.DEFAULT_TYPE) -> WildberriesClient:
         timeout=config.request_timeout,
         request_delay_seconds=config.wb_request_delay_seconds,
         retries=config.wb_request_retries,
+        rate_limit_cooldown_seconds=config.wb_429_cooldown_seconds,
+        proxy_url=config.wb_proxy_url,
     )
 
 
