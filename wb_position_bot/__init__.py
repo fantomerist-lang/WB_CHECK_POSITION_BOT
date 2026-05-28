@@ -1,0 +1,2 @@
+"""Wildberries position analysis bot."""
+
