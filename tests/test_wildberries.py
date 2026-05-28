@@ -4,6 +4,7 @@ import unittest
 
 from wb_position_bot.wildberries import (
     SEARCH_ENDPOINTS,
+    WildberriesClient,
     WildberriesError,
     extract_products,
     parse_json_response,
@@ -66,6 +67,25 @@ class WildberriesParsingTest(unittest.TestCase):
 
     def test_keeps_old_search_endpoint_as_fallback(self):
         self.assertIn("https://search.wb.ru/exactmatch/ru/common/v4/search", SEARCH_ENDPOINTS)
+
+    def test_search_skips_empty_endpoint_response(self):
+        class FakeClient(WildberriesClient):
+            def __init__(self):
+                super().__init__(retries=1)
+                self.calls = 0
+
+            def _warm_up(self):
+                return None
+
+            def _get_json(self, endpoint, params):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"metadata": {"catalog_type": "preset"}}
+                return {"data": {"products": [{"id": 789, "name": "Product", "supplier": "Shop"}]}}
+
+        result = FakeClient().search("test")
+
+        self.assertEqual([item.nm_id for item in result], [789])
 
 
 if __name__ == "__main__":
