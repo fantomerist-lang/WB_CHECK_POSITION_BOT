@@ -25,6 +25,11 @@ class WildberriesRateLimitError(WildberriesError):
 
 
 SEARCH_ENDPOINTS = (
+    "https://search.wb.ru/exactmatch/ru/common/v18/search",
+    "https://search.wb.ru/exactmatch/ru/common/v17/search",
+    "https://search.wb.ru/exactmatch/ru/common/v16/search",
+    "https://search.wb.ru/exactmatch/ru/common/v15/search",
+    "https://search.wb.ru/exactmatch/ru/common/v14/search",
     "https://search.wb.ru/exactmatch/ru/common/v13/search",
     "https://search.wb.ru/exactmatch/ru/common/v12/search",
     "https://search.wb.ru/exactmatch/ru/common/v11/search",
@@ -103,16 +108,22 @@ class WildberriesClient:
             "suppressSpellcheck": "false",
         }
         last_error: Exception | None = None
+        saw_empty_response = False
         for endpoint in SEARCH_ENDPOINTS:
             try:
                 payload = self._get_json(endpoint, params)
                 products = extract_products(payload)
-                return [parse_search_item(item) for item in products if isinstance(item, dict) and extract_nm_id(item)]
+                parsed = parse_search_items(products)
+                if parsed:
+                    return parsed
+                saw_empty_response = True
             except WildberriesRateLimitError as error:
                 raise error
             except Exception as error:
                 last_error = error
                 continue
+        if saw_empty_response:
+            return []
         raise WildberriesError(f"не удалось получить выдачу WB: {last_error}")
 
     def _get_json(self, endpoint: str, params: dict[str, str]) -> dict[str, Any]:
@@ -478,6 +489,18 @@ def parse_float(raw: Any) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def parse_search_items(products: list[Any]) -> list[SearchResultItem]:
+    parsed: list[SearchResultItem] = []
+    for item in products:
+        if not isinstance(item, dict) or not extract_nm_id(item):
+            continue
+        try:
+            parsed.append(parse_search_item(item))
+        except WildberriesError:
+            continue
+    return parsed
 
 
 def parse_search_item(item: dict[str, Any]) -> SearchResultItem:
