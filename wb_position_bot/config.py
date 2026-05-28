@@ -117,5 +117,5 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_proxy_url=os.getenv("WB_PROXY_URL", "").strip(),
         wb_proxy_auth_token=os.getenv("WB_PROXY_AUTH_TOKEN", "").strip(),
         wb_proxy_insecure_ssl=_bool_env("WB_PROXY_INSECURE_SSL", False),
-        request_timeout=_float_env("REQUEST_TIMEOUT", 25.0),
+        request_timeout=_float_env("REQUEST_TIMEOUT", 60.0),
     )

@@ -45,7 +45,7 @@ class WildberriesClient:
         dest: str = "-1257786",
         currency: str = "rub",
         locale: str = "ru",
-        timeout: float = 25.0,
+        timeout: float = 60.0,
         request_delay_seconds: float = 0.8,
         request_delay_jitter_seconds: float = 0.0,
         retries: int = 3,
@@ -125,7 +125,7 @@ class WildberriesClient:
                 if attempt < self.retries:
                     time.sleep(min(1.5 * attempt, 6.0))
                     continue
-                raise WildberriesError(str(error)) from error
+                raise WildberriesError(timeout_or_network_error_message(error, self.timeout)) from error
         else:
             raise WildberriesError(str(last_error))
 
@@ -221,6 +221,16 @@ def response_preview(raw: str, limit: int = 240) -> str:
     if len(text) > limit:
         text = text[:limit] + "..."
     return text or "<empty>"
+
+
+def timeout_or_network_error_message(error: Exception, timeout: float) -> str:
+    text = str(error) or error.__class__.__name__
+    if "timed out" in text.lower() or isinstance(error, (TimeoutError, socket.timeout)):
+        return (
+            f"таймаут ответа WB/Site Unblocker после {int(timeout)} сек. "
+            "Для Decodo Site Unblocker поставь REQUEST_TIMEOUT=60 или 90 в Railway."
+        )
+    return text
 
 
 def parse_json_response(raw: str) -> dict[str, Any]:
