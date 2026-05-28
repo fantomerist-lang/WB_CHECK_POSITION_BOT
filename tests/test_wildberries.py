@@ -11,6 +11,11 @@ class WildberriesParsingTest(unittest.TestCase):
 
         self.assertEqual(payload["data"]["products"][0]["id"], 1)
 
+    def test_parses_json_with_control_char_inside_string(self):
+        payload = parse_json_response('{"metadata": {"catalog_value": "a\x01b"}, "data": {"products": []}}')
+
+        self.assertEqual(payload["metadata"]["catalog_value"], "a\x01b")
+
     def test_extracts_nested_cards_with_nm_id(self):
         payload = {
             "metadata": {"catalog_type": "preset"},
