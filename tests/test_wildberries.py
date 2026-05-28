@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from wb_position_bot.wildberries import (
+    SEARCH_ENDPOINTS,
+    WildberriesError,
     extract_products,
     parse_json_response,
     parse_search_item,
@@ -57,6 +59,13 @@ class WildberriesParsingTest(unittest.TestCase):
         )
 
         self.assertIn("WB_REQUEST_RETRIES=4", message)
+
+    def test_not_found_metadata_is_endpoint_error(self):
+        with self.assertRaises(WildberriesError):
+            parse_json_response('{"metadata":{"preset_normquery_map":{"202812737":"8 в 1"}},ot Found')
+
+    def test_keeps_old_search_endpoint_as_fallback(self):
+        self.assertIn("https://search.wb.ru/exactmatch/ru/common/v4/search", SEARCH_ENDPOINTS)
 
 
 if __name__ == "__main__":
