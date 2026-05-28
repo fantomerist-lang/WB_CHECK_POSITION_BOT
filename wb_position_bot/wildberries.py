@@ -87,10 +87,8 @@ class WildberriesClient:
         for endpoint in SEARCH_ENDPOINTS:
             try:
                 payload = self._get_json(endpoint, params)
-                products = payload.get("data", {}).get("products", [])
-                if not isinstance(products, list):
-                    return []
-                return [parse_search_item(item) for item in products if isinstance(item, dict) and item.get("id")]
+                products = extract_products(payload)
+                return [parse_search_item(item) for item in products if isinstance(item, dict) and extract_nm_id(item)]
             except WildberriesRateLimitError as error:
                 raise error
             except Exception as error:
@@ -131,11 +129,7 @@ class WildberriesClient:
         else:
             raise WildberriesError(str(last_error))
 
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as error:
-            preview = response_preview(raw)
-            raise WildberriesError(f"WB вернул не JSON: {preview}") from error
+        return parse_json_response(raw)
 
     def _wait_for_slot(self) -> None:
         delay = self.request_delay_seconds
@@ -229,6 +223,138 @@ def response_preview(raw: str, limit: int = 240) -> str:
     return text or "<empty>"
 
 
+def parse_json_response(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = decode_first_json_object(raw)
+    if isinstance(value, dict):
+        return value
+    raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+
+
+def decode_first_json_object(raw: str) -> dict[str, Any]:
+    text = str(raw or "")
+    start = text.find("{")
+    if start < 0:
+        raise WildberriesError(f"WB вернул не JSON: {response_preview(raw)}")
+    decoder = json.JSONDecoder()
+    try:
+        value, _ = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError as error:
+        raise WildberriesError(f"WB вернул не JSON: {response_preview(raw)}") from error
+    if not isinstance(value, dict):
+        raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+    return value
+
+
+def extract_products(payload: dict[str, Any]) -> list[Any]:
+    for container in (payload.get("data"), payload):
+        if isinstance(container, dict):
+            for key in ("products", "cards", "items"):
+                products = container.get(key)
+                if is_product_list(products):
+                    return products
+
+    found = find_product_list(payload)
+    if found is not None:
+        return found
+    return []
+
+
+def find_product_list(value: Any, depth: int = 0) -> list[Any] | None:
+    if depth > 5:
+        return None
+    if is_product_list(value):
+        return value
+    if isinstance(value, dict):
+        for key in ("products", "cards", "items", "goods", "nms"):
+            found = find_product_list(value.get(key), depth + 1)
+            if found is not None:
+                return found
+        for nested in value.values():
+            found = find_product_list(nested, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value[:20]:
+            found = find_product_list(nested, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def is_product_list(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    checked = [item for item in value[:8] if isinstance(item, dict)]
+    if not checked:
+        return False
+    return any(looks_like_product(item) for item in checked)
+
+
+def looks_like_product(item: dict[str, Any]) -> bool:
+    if not extract_nm_id(item):
+        return False
+    product_keys = {
+        "brand",
+        "brandName",
+        "feedbacks",
+        "name",
+        "price",
+        "priceU",
+        "rating",
+        "reviewRating",
+        "salePrice",
+        "salePriceU",
+        "seller",
+        "sellerName",
+        "sizes",
+        "supplier",
+        "supplierName",
+        "title",
+    }
+    return bool(product_keys.intersection(item))
+
+
+def first_value(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def first_text(item: dict[str, Any], *keys: str) -> str:
+    value = first_value(item, *keys)
+    return str(value or "").strip()
+
+
+def extract_nm_id(item: dict[str, Any]) -> int | None:
+    for key in ("id", "nmId", "nm_id", "nm", "productId", "product_id"):
+        value = parse_int(item.get(key))
+        if value and value > 0:
+            return value
+    return None
+
+
+def extract_price_from_sizes(item: dict[str, Any], *keys: str) -> float | None:
+    sizes = item.get("sizes")
+    if not isinstance(sizes, list):
+        return None
+    for size in sizes:
+        if not isinstance(size, dict):
+            continue
+        price = size.get("price")
+        if not isinstance(price, dict):
+            continue
+        for key in keys:
+            parsed = parse_price(price.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def parse_price(raw: Any) -> float | None:
     if raw is None:
         return None
@@ -256,11 +382,15 @@ def parse_float(raw: Any) -> float | None:
 
 
 def parse_search_item(item: dict[str, Any]) -> SearchResultItem:
-    nm_id = int(item["id"])
-    supplier_id = parse_int(item.get("supplierId") or item.get("supplier_id"))
-    supplier_name = str(item.get("supplier") or item.get("supplierName") or "").strip()
-    name = str(item.get("name") or "").strip()
-    brand = str(item.get("brand") or "").strip()
+    nm_id = extract_nm_id(item)
+    if not nm_id:
+        raise WildberriesError(f"WB вернул карточку без nm_id: {response_preview(item)}")
+    supplier_id = parse_int(first_value(item, "supplierId", "supplier_id", "sellerId", "seller_id"))
+    supplier_name = first_text(item, "supplier", "supplierName", "supplier_name", "seller", "sellerName", "seller_name")
+    name = first_text(item, "name", "title", "productName", "product_name", "imtName", "imt_name")
+    brand = first_text(item, "brand", "brandName", "brand_name")
+    price = parse_price(first_value(item, "priceU", "price", "basicPriceU", "basicPrice"))
+    sale_price = parse_price(first_value(item, "salePriceU", "salePrice", "totalPriceU", "totalPrice"))
     return SearchResultItem(
         rank=0,
         nm_id=nm_id,
@@ -268,8 +398,8 @@ def parse_search_item(item: dict[str, Any]) -> SearchResultItem:
         brand=brand,
         supplier_id=supplier_id,
         supplier_name=supplier_name,
-        price=parse_price(item.get("priceU") or item.get("price")),
-        sale_price=parse_price(item.get("salePriceU") or item.get("salePrice")),
+        price=price or extract_price_from_sizes(item, "basic", "product"),
+        sale_price=sale_price or extract_price_from_sizes(item, "total", "product", "basic"),
         rating=parse_float(item.get("reviewRating") or item.get("rating")),
         feedbacks=parse_int(item.get("feedbacks")),
         url=f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx",
