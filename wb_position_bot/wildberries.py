@@ -248,6 +248,40 @@ def decode_first_json_object(raw: str) -> dict[str, Any]:
     return value
 
 
+def parse_json_response(raw: str) -> dict[str, Any]:
+    text = str(raw or "").lstrip("\ufeff")
+    try:
+        value = json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        value = decode_first_json_object(text)
+    if isinstance(value, dict):
+        return value
+    raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+
+
+def decode_first_json_object(raw: str) -> dict[str, Any]:
+    text = str(raw or "").lstrip("\ufeff")
+    start = text.find("{")
+    if start < 0:
+        raise WildberriesError(f"WB вернул не JSON: {response_preview(raw)}")
+    decoder = json.JSONDecoder(strict=False)
+    try:
+        value, _ = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError as error:
+        raise WildberriesError(f"WB вернул не JSON: {json_error_preview(text, start + error.pos)}") from error
+    if not isinstance(value, dict):
+        raise WildberriesError(f"WB вернул не JSON-объект: {response_preview(raw)}")
+    return value
+
+
+def json_error_preview(raw: str, error_pos: int, window: int = 90) -> str:
+    text = str(raw or "")
+    left = max(error_pos - window, 0)
+    right = min(error_pos + window, len(text))
+    snippet = response_preview(text[left:right], limit=window * 2)
+    return f"позиция {error_pos}: {snippet}"
+
+
 def extract_products(payload: dict[str, Any]) -> list[Any]:
     for container in (payload.get("data"), payload):
         if isinstance(container, dict):
