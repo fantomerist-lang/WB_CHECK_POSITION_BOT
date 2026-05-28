@@ -135,6 +135,7 @@ python main.py bot
 - `WB_PROXY_URL=` необязательно, если Railway IP блокируется
 - `WB_PROXY_AUTH_TOKEN=`
 - `WB_PROXY_INSECURE_SSL=0`
+- `REQUEST_TIMEOUT=60`
 
 Для SQLite на Railway нужен volume, смонтированный в `data/`, чтобы база не пропадала после деплоя.
 
@@ -154,6 +155,7 @@ python main.py bot
 WB_PROXY_URL=https://unblock.decodo.com:60000
 WB_PROXY_AUTH_TOKEN=BASE64_TOKEN_FROM_DECODO
 WB_PROXY_INSECURE_SSL=1
+REQUEST_TIMEOUT=60
 ```
 
 `WB_DEST=-1257786` оставлен как российский региональный параметр для проверки позиций. Если понадобится строго другой город/регион России, нужно будет заменить `WB_DEST` после теста на реальной выдаче WB.
