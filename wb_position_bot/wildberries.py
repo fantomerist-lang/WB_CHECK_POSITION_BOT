@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.cookiejar
+import http.client
 import json
 import re
 import random
@@ -39,6 +40,16 @@ USER_AGENTS = (
 )
 
 
+TRANSIENT_NETWORK_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    socket.timeout,
+    ConnectionError,
+    http.client.BadStatusLine,
+    http.client.IncompleteRead,
+)
+
+
 class WildberriesClient:
     def __init__(
         self,
@@ -62,6 +73,7 @@ class WildberriesClient:
         self.request_delay_jitter_seconds = max(float(request_delay_jitter_seconds or 0), 0.0)
         self.retries = max(int(retries or 1), 1)
         self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
+        self.proxy_url = str(proxy_url or "")
         self._last_request_at = 0.0
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = build_opener(proxy_url, self.cookie_jar, proxy_insecure_ssl, proxy_auth_token)
@@ -120,10 +132,10 @@ class WildberriesClient:
                     time.sleep(min(2.0 * attempt, 8.0))
                     continue
                 raise WildberriesError(f"HTTP {error.code}") from error
-            except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+            except TRANSIENT_NETWORK_ERRORS as error:
                 last_error = error
                 if attempt < self.retries:
-                    time.sleep(min(1.5 * attempt, 6.0))
+                    time.sleep(min(2.5 * attempt, 10.0))
                     continue
                 raise WildberriesError(timeout_or_network_error_message(error, self.timeout)) from error
         else:
@@ -164,6 +176,8 @@ class WildberriesClient:
         if self._warmed_up:
             return
         self._warmed_up = True
+        if "unblock.decodo.com" in self.proxy_url:
+            return
         request = urllib.request.Request(
             "https://www.wildberries.ru/",
             headers={
@@ -229,6 +243,11 @@ def timeout_or_network_error_message(error: Exception, timeout: float) -> str:
         return (
             f"таймаут ответа WB/Site Unblocker после {int(timeout)} сек. "
             "Для Decodo Site Unblocker поставь REQUEST_TIMEOUT=60 или 90 в Railway."
+        )
+    if "remote end closed connection" in text.lower() or isinstance(error, http.client.BadStatusLine):
+        return (
+            "Site Unblocker оборвал соединение без ответа. "
+            "Это временная сетевая ошибка; поставь WB_REQUEST_RETRIES=4 или 5 в Railway."
         )
     return text
 

@@ -112,7 +112,7 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_max_search_pages=_int_env("WB_MAX_SEARCH_PAGES", 20, minimum=1),
         wb_request_delay_seconds=_float_env("WB_REQUEST_DELAY_SECONDS", 2.0),
         wb_request_delay_jitter_seconds=_float_env("WB_REQUEST_DELAY_JITTER_SECONDS", 3.0),
-        wb_request_retries=_int_env("WB_REQUEST_RETRIES", 2, minimum=1),
+        wb_request_retries=_int_env("WB_REQUEST_RETRIES", 4, minimum=1),
         wb_429_cooldown_seconds=_float_env("WB_429_COOLDOWN_SECONDS", 15.0),
         wb_proxy_url=os.getenv("WB_PROXY_URL", "").strip(),
         wb_proxy_auth_token=os.getenv("WB_PROXY_AUTH_TOKEN", "").strip(),
