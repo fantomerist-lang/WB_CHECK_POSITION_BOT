@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import re
 import random
 import socket
 import ssl
@@ -133,7 +134,8 @@ class WildberriesClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as error:
-            raise WildberriesError("WB вернул не JSON") from error
+            preview = response_preview(raw)
+            raise WildberriesError(f"WB вернул не JSON: {preview}") from error
 
     def _wait_for_slot(self) -> None:
         delay = self.request_delay_seconds
@@ -218,6 +220,13 @@ def build_opener(
     if auth_token:
         opener.addheaders = [("Proxy-Authorization", f"Basic {auth_token}")]
     return opener
+
+
+def response_preview(raw: str, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text or "<empty>"
 
 
 def parse_price(raw: Any) -> float | None:
