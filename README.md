@@ -133,6 +133,8 @@ python main.py bot
 - `WB_REQUEST_RETRIES=2`
 - `WB_429_COOLDOWN_SECONDS=15`
 - `WB_PROXY_URL=` необязательно, если Railway IP блокируется
+- `WB_PROXY_AUTH_TOKEN=`
+- `WB_PROXY_INSECURE_SSL=0`
 
 Для SQLite на Railway нужен volume, смонтированный в `data/`, чтобы база не пропадала после деплоя.
 
@@ -145,5 +147,13 @@ python main.py bot
 Если Railway получает HTTP 429 даже на одиночном `/check`, значит WB ограничивает серверный IP. Тогда нужен `WB_PROXY_URL` с российским HTTP/HTTPS proxy.
 
 Для Decodo residential support рекомендует sticky Russia session через `gate.decodo.com:7000`, username вида `user-USERNAME-country-ru-session-SESSIONID-sessionduration-10`, случайные задержки 2-5 секунд и ротацию User-Agent. Бот поддерживает это через `WB_REQUEST_DELAY_SECONDS=2` и `WB_REQUEST_DELAY_JITTER_SECONDS=3`.
+
+Для Decodo Site Unblocker используй endpoint `unblock.decodo.com:60000`. В документации Decodo для Site Unblocker указан `curl -k`, поэтому для этого режима поставь:
+
+```env
+WB_PROXY_URL=https://unblock.decodo.com:60000
+WB_PROXY_AUTH_TOKEN=BASE64_TOKEN_FROM_DECODO
+WB_PROXY_INSECURE_SSL=1
+```
 
 `WB_DEST=-1257786` оставлен как российский региональный параметр для проверки позиций. Если понадобится строго другой город/регион России, нужно будет заменить `WB_DEST` после теста на реальной выдаче WB.

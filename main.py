@@ -44,6 +44,8 @@ def _client() -> WildberriesClient:
         retries=config.wb_request_retries,
         rate_limit_cooldown_seconds=config.wb_429_cooldown_seconds,
         proxy_url=config.wb_proxy_url,
+        proxy_auth_token=config.wb_proxy_auth_token,
+        proxy_insecure_ssl=config.wb_proxy_insecure_ssl,
     )
 
 
