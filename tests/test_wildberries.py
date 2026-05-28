@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from wb_position_bot.wildberries import extract_products, parse_json_response, parse_search_item
+from wb_position_bot.wildberries import (
+    extract_products,
+    parse_json_response,
+    parse_search_item,
+    timeout_or_network_error_message,
+)
 
 
 class WildberriesParsingTest(unittest.TestCase):
@@ -44,6 +49,14 @@ class WildberriesParsingTest(unittest.TestCase):
 
         self.assertEqual(parsed.price, 1234)
         self.assertEqual(parsed.sale_price, 999)
+
+    def test_remote_close_message_suggests_retries(self):
+        message = timeout_or_network_error_message(
+            ConnectionError("Remote end closed connection without response"),
+            60,
+        )
+
+        self.assertIn("WB_REQUEST_RETRIES=4", message)
 
 
 if __name__ == "__main__":
