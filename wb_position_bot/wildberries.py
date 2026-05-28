@@ -50,6 +50,7 @@ class WildberriesClient:
         retries: int = 3,
         rate_limit_cooldown_seconds: float = 15.0,
         proxy_url: str = "",
+        proxy_auth_token: str = "",
         proxy_insecure_ssl: bool = False,
     ) -> None:
         self.dest = dest
@@ -62,7 +63,7 @@ class WildberriesClient:
         self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
         self._last_request_at = 0.0
         self.cookie_jar = http.cookiejar.CookieJar()
-        self.opener = build_opener(proxy_url, self.cookie_jar, proxy_insecure_ssl)
+        self.opener = build_opener(proxy_url, self.cookie_jar, proxy_insecure_ssl, proxy_auth_token)
         self._warmed_up = False
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
@@ -197,8 +198,10 @@ def build_opener(
     proxy_url: str = "",
     cookie_jar: http.cookiejar.CookieJar | None = None,
     insecure_ssl: bool = False,
+    proxy_auth_token: str = "",
 ) -> urllib.request.OpenerDirector:
     proxy = str(proxy_url or "").strip()
+    auth_token = str(proxy_auth_token or "").strip()
     handlers: list[urllib.request.BaseHandler] = []
     if cookie_jar is not None:
         handlers.append(urllib.request.HTTPCookieProcessor(cookie_jar))
@@ -211,7 +214,10 @@ def build_opener(
             {"http": proxy, "https": proxy}
         )
     )
-    return urllib.request.build_opener(*handlers)
+    opener = urllib.request.build_opener(*handlers)
+    if auth_token:
+        opener.addheaders = [("Proxy-Authorization", f"Basic {auth_token}")]
+    return opener
 
 
 def parse_price(raw: Any) -> float | None:

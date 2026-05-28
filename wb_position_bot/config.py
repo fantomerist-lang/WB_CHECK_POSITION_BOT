@@ -36,6 +36,7 @@ class Config:
     wb_request_retries: int
     wb_429_cooldown_seconds: float
     wb_proxy_url: str
+    wb_proxy_auth_token: str
     wb_proxy_insecure_ssl: bool
     request_timeout: float
 
@@ -114,6 +115,7 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_request_retries=_int_env("WB_REQUEST_RETRIES", 2, minimum=1),
         wb_429_cooldown_seconds=_float_env("WB_429_COOLDOWN_SECONDS", 15.0),
         wb_proxy_url=os.getenv("WB_PROXY_URL", "").strip(),
+        wb_proxy_auth_token=os.getenv("WB_PROXY_AUTH_TOKEN", "").strip(),
         wb_proxy_insecure_ssl=_bool_env("WB_PROXY_INSECURE_SSL", False),
         request_timeout=_float_env("REQUEST_TIMEOUT", 25.0),
     )
