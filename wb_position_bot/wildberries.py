@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import random
 import socket
@@ -58,9 +59,12 @@ class WildberriesClient:
         self.retries = max(int(retries or 1), 1)
         self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
         self._last_request_at = 0.0
-        self.opener = build_opener(proxy_url)
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = build_opener(proxy_url, self.cookie_jar)
+        self._warmed_up = False
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
+        self._warm_up()
         params = {
             "ab_testing": "false",
             "appType": "1",
@@ -147,11 +151,35 @@ class WildberriesClient:
             headers={
                 "Accept": "application/json,text/plain,*/*",
                 "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+                "Connection": "keep-alive",
                 "Origin": "https://www.wildberries.ru",
                 "Referer": "https://www.wildberries.ru/",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site",
                 "User-Agent": random.choice(USER_AGENTS),
             },
         )
+
+    def _warm_up(self) -> None:
+        if self._warmed_up:
+            return
+        self._warmed_up = True
+        request = urllib.request.Request(
+            "https://www.wildberries.ru/",
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+                "Connection": "keep-alive",
+                "User-Agent": random.choice(USER_AGENTS),
+            },
+        )
+        try:
+            self._wait_for_slot()
+            with self.opener.open(request, timeout=self.timeout) as response:
+                response.read(2048)
+        except Exception:
+            return
 
     def _rate_limit_wait_seconds(self, error: urllib.error.HTTPError, attempt: int) -> float:
         retry_after = error.headers.get("Retry-After") if error.headers else None
@@ -163,18 +191,22 @@ class WildberriesClient:
         return max(self.rate_limit_cooldown_seconds, min(10.0 * attempt, 60.0))
 
 
-def build_opener(proxy_url: str = "") -> urllib.request.OpenerDirector:
+def build_opener(
+    proxy_url: str = "",
+    cookie_jar: http.cookiejar.CookieJar | None = None,
+) -> urllib.request.OpenerDirector:
     proxy = str(proxy_url or "").strip()
+    handlers: list[urllib.request.BaseHandler] = []
+    if cookie_jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(cookie_jar))
     if not proxy:
-        return urllib.request.build_opener()
-    return urllib.request.build_opener(
+        return urllib.request.build_opener(*handlers)
+    handlers.append(
         urllib.request.ProxyHandler(
-            {
-                "http": proxy,
-                "https": proxy,
-            }
+            {"http": proxy, "https": proxy}
         )
     )
+    return urllib.request.build_opener(*handlers)
 
 
 def parse_price(raw: Any) -> float | None:
