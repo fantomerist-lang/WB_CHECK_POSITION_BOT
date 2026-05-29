@@ -21,9 +21,11 @@ from .config import Config, get_config
 from .db import (
     active_targets,
     connect,
+    get_target_by_id,
     get_setting,
     get_target_by_nm_id,
     save_position_check,
+    set_target_active,
     set_setting,
     upsert_target,
 )
@@ -179,6 +181,43 @@ async def list_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(targets) > 50:
         lines.append(f"...и еще {len(targets) - 50}")
     await update.effective_message.reply_text("\n".join(lines))
+
+
+def target_by_number(conn, value: int) -> ProductTarget | None:
+    return get_target_by_nm_id(conn, value) or get_target_by_id(conn, value)
+
+
+async def set_active_command(update: Update, context: ContextTypes.DEFAULT_TYPE, active: bool) -> None:
+    if not await ensure_admin(update, context):
+        return
+    args = context.args or []
+    command = "enable" if active else "disable"
+    if not args:
+        await update.effective_message.reply_text(f"Напиши /{command} nm_id или id из /list.")
+        return
+    try:
+        value = int(args[0])
+    except ValueError:
+        await update.effective_message.reply_text("ID должен быть числом.")
+        return
+
+    conn = connect(db_path(context))
+    target = target_by_number(conn, value)
+    if not target or not target.id:
+        await update.effective_message.reply_text("Карточка не найдена в базе.")
+        return
+
+    saved = set_target_active(conn, target.id, active)
+    status = "включена" if active else "выключена"
+    await update.effective_message.reply_text(f"Запись {saved.id if saved else target.id} {status}: {target.search_query}")
+
+
+async def disable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_active_command(update, context, active=False)
+
+
+async def enable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_active_command(update, context, active=True)
 
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -436,6 +475,8 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("list", list_targets))
+    app.add_handler(CommandHandler("disable", disable))
+    app.add_handler(CommandHandler("enable", enable))
     app.add_handler(CommandHandler("check", check))
     app.add_handler(CommandHandler("checkall", checkall))
     app.add_handler(CommandHandler("week", week))

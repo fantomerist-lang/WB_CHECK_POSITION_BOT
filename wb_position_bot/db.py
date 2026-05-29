@@ -118,6 +118,20 @@ def get_target_by_sku(conn: sqlite3.Connection, sku: str) -> ProductTarget | Non
     return row_to_target(row) if row else None
 
 
+def set_target_active(conn: sqlite3.Connection, target_id: int, active: bool) -> ProductTarget | None:
+    conn.execute(
+        """
+        update tracked_products
+        set active = ?,
+            updated_at = current_timestamp
+        where id = ?
+        """,
+        (1 if active else 0, target_id),
+    )
+    conn.commit()
+    return get_target_by_id(conn, target_id)
+
+
 def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int | None:
     if target.id:
         return target.id
