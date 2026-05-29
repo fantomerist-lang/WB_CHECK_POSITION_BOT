@@ -280,8 +280,10 @@ def render_position_chart(
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    package_dir = Path(__file__).resolve().parent
     project_root = Path(__file__).resolve().parent.parent
     candidates = [
+        package_dir / "assets" / "fonts" / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
         project_root / "assets" / "fonts" / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
         "C:/Windows/Fonts/DejaVuSans-Bold.ttf" if bold else "C:/Windows/Fonts/DejaVuSans.ttf",
         "C:/Windows/Fonts/NotoSans-Bold.ttf" if bold else "C:/Windows/Fonts/NotoSans-Regular.ttf",
@@ -296,7 +298,10 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
             font = ImageFont.truetype(str(path), size=size)
             if _font_supports_cyrillic(font):
                 return font
-    return ImageFont.load_default()
+    raise RuntimeError(
+        "Не найден TTF-шрифт с кириллицей для графика. "
+        "Загрузи wb_position_bot/assets/fonts/DejaVuSans.ttf и DejaVuSans-Bold.ttf."
+    )
 
 
 def _font_supports_cyrillic(font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> bool:

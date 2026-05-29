@@ -311,15 +311,19 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         check_source="auto",
     )
     output = chart_path(context, "week", target, week_range.key)
-    render_position_chart(
-        target,
-        points,
-        output,
-        title=f"WB week {week_range.key}",
-        subtitle=f"{target.search_query} | {week_range.label()}",
-        x_start=week_range.start,
-        x_end=week_range.end,
-    )
+    try:
+        render_position_chart(
+            target,
+            points,
+            output,
+            title=f"WB week {week_range.key}",
+            subtitle=f"{target.search_query} | {week_range.label()}",
+            x_start=week_range.start,
+            x_end=week_range.end,
+        )
+    except RuntimeError as error:
+        await update.effective_message.reply_text(f"Не удалось построить график: {error}")
+        return
     await safe_send_message(
         context,
         update.effective_chat.id,
@@ -345,13 +349,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     points = load_position_history(conn, target, config.timezone)
     output = chart_path(context, "stats", target, "all-time")
-    render_position_chart(
-        target,
-        points,
-        output,
-        title="WB all-time positions",
-        subtitle=target.search_query,
-    )
+    try:
+        render_position_chart(
+            target,
+            points,
+            output,
+            title="WB all-time positions",
+            subtitle=target.search_query,
+        )
+    except RuntimeError as error:
+        await update.effective_message.reply_text(f"Не удалось построить график: {error}")
+        return
     await safe_send_message(
         context,
         update.effective_chat.id,
