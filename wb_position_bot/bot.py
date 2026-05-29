@@ -15,6 +15,7 @@ from .analytics import (
     format_history_summary,
     load_position_history,
     render_position_chart,
+    render_week_position_chart,
 )
 from .analyzer import analyze_target
 from .config import Config, get_config
@@ -312,14 +313,12 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     output = chart_path(context, "week", target, week_range.key)
     try:
-        render_position_chart(
+        render_week_position_chart(
             target,
             points,
             output,
-            title=f"WB week {week_range.key}",
-            subtitle=f"{target.search_query} | {week_range.label()}",
-            x_start=week_range.start,
-            x_end=week_range.end,
+            week_range,
+            max_search_pages=config.wb_max_search_pages,
         )
     except RuntimeError as error:
         await update.effective_message.reply_text(f"Не удалось построить график: {error}")
