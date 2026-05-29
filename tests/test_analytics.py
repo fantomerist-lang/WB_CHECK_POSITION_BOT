@@ -54,6 +54,29 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual([point.position for point in all_points], [9, 6, 4])
         self.assertEqual(summarize_history(all_points).delta, 5)
 
+    def test_can_filter_history_by_auto_checks(self):
+        tz = ZoneInfo("Europe/Kyiv")
+        conn = connect(":memory:")
+        target = upsert_target(conn, ProductTarget(nm_id=42, search_query="test"))
+        conn.executemany(
+            """
+            insert into position_checks(
+              product_id, query, checked_at, own_position, match_reason,
+              pages_checked, top_json, own_item_json, warnings_json, check_source
+            ) values (?, ?, ?, ?, '', 1, '[]', null, '[]', ?)
+            """,
+            [
+                (target.id, "test", "2026-05-26T09:00:00+00:00", 2, "auto"),
+                (target.id, "test", "2026-05-26T10:00:00+00:00", 9, "manual"),
+                (target.id, "test", "2026-05-27T09:00:00+00:00", 1, "auto"),
+            ],
+        )
+        conn.commit()
+
+        points = load_position_history(conn, target, tz, check_source="auto")
+
+        self.assertEqual([point.position for point in points], [2, 1])
+
     def test_renders_chart_png(self):
         tz = ZoneInfo("Europe/Kyiv")
         conn = connect(":memory:")
