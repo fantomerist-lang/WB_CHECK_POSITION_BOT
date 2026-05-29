@@ -78,18 +78,21 @@ def load_position_history(
     tz: ZoneInfo,
     start: datetime | None = None,
     end: datetime | None = None,
+    check_source: str | None = None,
 ) -> list[PositionPoint]:
     if not target.id:
         return []
-    rows = conn.execute(
-        """
+    sql = """
         select checked_at, own_position, query
         from position_checks
         where product_id = ?
-        order by checked_at, id
-        """,
-        (target.id,),
-    ).fetchall()
+        """
+    params: list[object] = [target.id]
+    if check_source:
+        sql += " and check_source = ?"
+        params.append(check_source)
+    sql += " order by checked_at, id"
+    rows = conn.execute(sql, params).fetchall()
 
     points: list[PositionPoint] = []
     for row in rows:

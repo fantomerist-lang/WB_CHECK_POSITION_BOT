@@ -56,6 +56,7 @@ def migrate(conn: sqlite3.Connection) -> None:
           top_json text not null,
           own_item_json text,
           warnings_json text not null default '[]',
+          check_source text not null default 'manual',
           created_at text not null default current_timestamp,
           foreign key(product_id) references tracked_products(id)
         );
@@ -64,7 +65,14 @@ def migrate(conn: sqlite3.Connection) -> None:
           on position_checks(product_id, checked_at);
         """
     )
+    ensure_column(conn, "position_checks", "check_source", "text not null default 'manual'")
     conn.commit()
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"pragma table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"alter table {table} add column {column} {definition}")
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
@@ -208,7 +216,7 @@ def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTar
     return saved
 
 
-def save_position_check(conn: sqlite3.Connection, analysis: PositionAnalysis) -> int:
+def save_position_check(conn: sqlite3.Connection, analysis: PositionAnalysis, check_source: str = "manual") -> int:
     if not analysis.target.id:
         saved = upsert_target(conn, analysis.target)
         analysis = analysis.with_target(saved)
@@ -216,8 +224,8 @@ def save_position_check(conn: sqlite3.Connection, analysis: PositionAnalysis) ->
         """
         insert into position_checks(
           product_id, query, checked_at, own_position, match_reason,
-          pages_checked, top_json, own_item_json, warnings_json
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          pages_checked, top_json, own_item_json, warnings_json, check_source
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             analysis.target.id,
@@ -229,10 +237,15 @@ def save_position_check(conn: sqlite3.Connection, analysis: PositionAnalysis) ->
             json.dumps([asdict(item) for item in analysis.top_items], ensure_ascii=False),
             json.dumps(asdict(analysis.own_item), ensure_ascii=False) if analysis.own_item else None,
             json.dumps(analysis.warnings, ensure_ascii=False),
+            normalize_check_source(check_source),
         ),
     )
     conn.commit()
     return int(cursor.lastrowid)
+
+
+def normalize_check_source(value: str) -> str:
+    return "auto" if str(value or "").strip().lower() == "auto" else "manual"
 
 
 def latest_checks(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:

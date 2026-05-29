@@ -252,7 +252,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except WildberriesError as error:
         await update.effective_message.reply_text(f"Ошибка WB: {error}")
         return
-    save_position_check(conn, analysis)
+    save_position_check(conn, analysis, check_source="manual")
     await update.effective_message.reply_text(format_analysis(analysis), disable_web_page_preview=True)
 
 
@@ -302,7 +302,14 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
     week_range = current_week_range(config.timezone)
-    points = load_position_history(conn, target, config.timezone, start=week_range.start, end=week_range.end)
+    points = load_position_history(
+        conn,
+        target,
+        config.timezone,
+        start=week_range.start,
+        end=week_range.end,
+        check_source="auto",
+    )
     output = chart_path(context, "week", target, week_range.key)
     render_position_chart(
         target,
@@ -316,7 +323,7 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_send_message(
         context,
         update.effective_chat.id,
-        format_history_summary(target, points, f"Текущая неделя {week_range.label()}"),
+        format_history_summary(target, points, f"Текущая неделя {week_range.label()} (только автоотчеты)"),
     )
     await safe_send_photo(context, update.effective_chat.id, output, caption="График текущей недели")
 
@@ -390,7 +397,7 @@ async def run_checks_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         except WildberriesError as error:
             await context.bot.send_message(chat_id=chat_id, text=f"Ошибка WB для {target.search_query}: {error}")
             continue
-        save_position_check(conn, analysis)
+        save_position_check(conn, analysis, check_source="auto" if auto else "manual")
         analyses.append(analysis)
 
     if not analyses:
