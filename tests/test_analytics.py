@@ -12,7 +12,7 @@ from wb_position_bot.analytics import (
     render_position_chart,
     summarize_history,
 )
-from wb_position_bot.db import connect, upsert_target
+from wb_position_bot.db import active_targets, connect, set_target_active, upsert_target
 from wb_position_bot.models import ProductTarget
 
 
@@ -74,6 +74,15 @@ class AnalyticsTest(unittest.TestCase):
             render_position_chart(target, points, output, "WB test", "test")
             self.assertTrue(output.exists())
             self.assertGreater(output.stat().st_size, 1000)
+
+    def test_can_disable_target(self):
+        conn = connect(":memory:")
+        target = upsert_target(conn, ProductTarget(nm_id=42, search_query="test"))
+
+        set_target_active(conn, target.id, False)
+
+        self.assertEqual(active_targets(conn), [])
+        self.assertFalse(active_targets(conn, include_inactive=True)[0].active)
 
 
 if __name__ == "__main__":
