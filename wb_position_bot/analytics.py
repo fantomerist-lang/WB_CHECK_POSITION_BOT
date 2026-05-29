@@ -277,15 +277,32 @@ def render_position_chart(
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    project_root = Path(__file__).resolve().parent.parent
     candidates = [
+        project_root / "assets" / "fonts" / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
+        "C:/Windows/Fonts/DejaVuSans-Bold.ttf" if bold else "C:/Windows/Fonts/DejaVuSans.ttf",
+        "C:/Windows/Fonts/NotoSans-Bold.ttf" if bold else "C:/Windows/Fonts/NotoSans-Regular.ttf",
         "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     ]
     for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return ImageFont.truetype(candidate, size=size)
+        path = Path(candidate)
+        if path.exists():
+            font = ImageFont.truetype(str(path), size=size)
+            if _font_supports_cyrillic(font):
+                return font
     return ImageFont.load_default()
+
+
+def _font_supports_cyrillic(font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> bool:
+    try:
+        cyrillic = bytes(font.getmask("Бухгалтерия"))
+        fallback = bytes(font.getmask("??????????"))
+    except Exception:
+        return False
+    return bool(cyrillic) and cyrillic != fallback
 
 
 def _draw_pill(
