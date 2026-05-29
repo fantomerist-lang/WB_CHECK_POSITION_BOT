@@ -7,6 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from wb_position_bot.analytics import (
+    _font,
     current_week_range,
     load_position_history,
     render_position_chart,
@@ -74,6 +75,15 @@ class AnalyticsTest(unittest.TestCase):
             render_position_chart(target, points, output, "WB test", "test")
             self.assertTrue(output.exists())
             self.assertGreater(output.stat().st_size, 1000)
+
+    def test_chart_font_supports_cyrillic(self):
+        font = _font(22)
+
+        self.assertIsNotNone(font.getmask("Бухгалтерия Казахстан").getbbox())
+        self.assertNotEqual(
+            bytes(font.getmask("Бухгалтерия")),
+            bytes(font.getmask("??????????")),
+        )
 
     def test_can_disable_target(self):
         conn = connect(":memory:")
