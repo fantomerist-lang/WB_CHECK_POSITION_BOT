@@ -7,10 +7,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from wb_position_bot.analytics import (
+    PositionPoint,
     _font,
     current_week_range,
     load_position_history,
     render_position_chart,
+    render_week_position_chart,
     summarize_history,
 )
 from wb_position_bot.db import active_targets, connect, set_target_active, upsert_target
@@ -96,6 +98,28 @@ class AnalyticsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "chart.png"
             render_position_chart(target, points, output, "WB test", "test")
+            self.assertTrue(output.exists())
+            self.assertGreater(output.stat().st_size, 1000)
+
+    def test_renders_week_chart_png(self):
+        tz = ZoneInfo("Europe/Kyiv")
+        week = current_week_range(tz, now=datetime(2026, 5, 28, 12, 0, tzinfo=tz))
+        target = ProductTarget(
+            nm_id=399568521,
+            name="WB 399568521",
+            search_query="1С:Бухгалтерия 8 для Казахстана. Базовая версия",
+            own_supplier_name="Кодерлайн",
+        )
+        points = [
+            PositionPoint(datetime(2026, 5, 25, 9, 0, tzinfo=tz), 3, target.search_query),
+            PositionPoint(datetime(2026, 5, 26, 9, 0, tzinfo=tz), 2, target.search_query),
+            PositionPoint(datetime(2026, 5, 27, 9, 0, tzinfo=tz), 1, target.search_query),
+            PositionPoint(datetime(2026, 5, 31, 9, 0, tzinfo=tz), None, target.search_query),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "week-chart.png"
+            render_week_position_chart(target, points, output, week, max_search_pages=20)
             self.assertTrue(output.exists())
             self.assertGreater(output.stat().st_size, 1000)
 
