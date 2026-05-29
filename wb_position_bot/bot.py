@@ -30,7 +30,7 @@ from .db import (
     upsert_target,
 )
 from .models import ProductTarget
-from .report import format_analysis, format_short_summary
+from .report import format_analysis, format_full_report_messages
 from .wildberries import WildberriesClient, WildberriesError
 
 
@@ -395,7 +395,8 @@ async def run_checks_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
 
     if not analyses:
         return
-    await safe_send_message(context, chat_id, format_short_summary(analyses), disable_web_page_preview=True)
+    for message in format_full_report_messages(analyses):
+        await safe_send_message(context, chat_id, message, disable_web_page_preview=True)
 
 
 async def safe_send_message(
