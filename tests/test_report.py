@@ -59,7 +59,7 @@ class ReportTest(unittest.TestCase):
 
         messages = format_full_report_messages([analysis])
 
-        self.assertEqual(messages[0], "Отчет WB по позициям\nПроверено запросов: 1")
+        self.assertEqual(messages[0], "Отчет по позициям: Wildberries\nПроверено запросов: 1")
         self.assertIn("Запрос 1/1", messages[1])
         self.assertIn("Запрос: query", messages[1])
         self.assertIn("Позиция твоей карточки: #1 в топ-5", messages[1])
