@@ -22,6 +22,7 @@ from .config import Config, get_config
 from .db import (
     active_targets,
     connect,
+    get_target_by_external_id,
     get_target_by_id,
     get_setting,
     get_target_by_nm_id,
@@ -32,7 +33,9 @@ from .db import (
 )
 from .models import ProductTarget
 from .report import format_analysis, format_full_report_messages
+from .target_parser import parse_add_args
 from .wildberries import WildberriesClient, WildberriesError
+from .yandex_market import YandexMarketClient, YandexMarketError
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -58,6 +61,29 @@ def wb_client(context: ContextTypes.DEFAULT_TYPE) -> WildberriesClient:
         proxy_auth_token=config.wb_proxy_auth_token,
         proxy_insecure_ssl=config.wb_proxy_insecure_ssl,
     )
+
+
+def ym_client(context: ContextTypes.DEFAULT_TYPE) -> YandexMarketClient:
+    config: Config = context.application.bot_data["config"]
+    return YandexMarketClient(
+        region_id=config.ym_region_id,
+        timeout=config.request_timeout,
+        request_delay_seconds=config.ym_request_delay_seconds,
+        request_delay_jitter_seconds=config.ym_request_delay_jitter_seconds,
+        retries=config.ym_request_retries,
+        proxy_url=config.ym_proxy_url,
+        proxy_auth_token=config.ym_proxy_auth_token,
+        proxy_insecure_ssl=config.ym_proxy_insecure_ssl,
+        enrich_sellers=config.ym_enrich_sellers,
+    )
+
+
+def client_for_target(context: ContextTypes.DEFAULT_TYPE, target: ProductTarget):
+    return ym_client(context) if target.marketplace == "ym" else wb_client(context)
+
+
+def max_pages_for_target(config: Config, target: ProductTarget) -> int:
+    return config.ym_max_search_pages if target.marketplace == "ym" else config.wb_max_search_pages
 
 
 def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -102,13 +128,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Готов. Команды:\n"
         "/status - состояние базы\n"
-        "/add 123456789 | поисковый запрос | Название моего магазина\n"
-        "/add поисковый запрос | Название моего магазина\n"
+        "/add 123456789 | запрос | Магазин - добавить Wildberries\n"
+        "/addym 103705469335 | запрос | Магазин - добавить Яндекс Маркет\n"
         "/list - список карточек\n"
-        "/check 123456789 - проверить карточку по nm_id или id из /list\n"
+        "/check 1 - проверить запись по id из /list\n"
         "/checkall - проверить все активные карточки\n"
-        "/week 123456789 - график текущей недели\n"
-        "/stats 123456789 - статистика за все время\n"
+        "/week 1 - график текущей недели по id из /list\n"
+        "/stats 1 - статистика за все время по id из /list\n"
         "/stats - краткая статистика по всем карточкам"
     )
 
@@ -120,40 +146,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = connect(config.database_path)
     targets = active_targets(conn, include_inactive=True)
     active_count = len([target for target in targets if target.active])
+    wb_count = len([target for target in targets if target.marketplace == "wb"])
+    ym_count = len([target for target in targets if target.marketplace == "ym"])
     await update.effective_message.reply_text(
         f"Карточек в базе: {len(targets)}\n"
+        f"Wildberries: {wb_count}\n"
+        f"Яндекс Маркет: {ym_count}\n"
         f"Активных: {active_count}\n"
         f"Автоотчеты: {', '.join(config.report_times)} каждые {config.report_interval_days} дн.\n"
-        f"WB pages: {config.wb_max_search_pages}"
-    )
-
-
-def parse_add_args(text: str) -> ProductTarget:
-    parts = [part.strip() for part in text.split("|")]
-    if len(parts) < 2:
-        raise ValueError(
-            "Формат: /add 123456789 | поисковый запрос | Название моего магазина\n"
-            "Или: /add поисковый запрос | Название моего магазина"
-        )
-    left = parts[0].split(maxsplit=1)
-    nm_id = None
-    if len(left) >= 2:
-        try:
-            nm_id = int(left[1])
-        except ValueError:
-            nm_id = None
-    if nm_id is not None:
-        query = parts[1]
-        supplier = parts[2] if len(parts) >= 3 else ""
-    else:
-        query = (text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else parts[0]).split("|", 1)[0].strip()
-        supplier = parts[1] if len(parts) >= 2 else ""
-    return ProductTarget(
-        nm_id=nm_id,
-        sku=str(nm_id) if nm_id else "",
-        name=f"WB {nm_id}" if nm_id else query,
-        search_query=query,
-        own_supplier_name=supplier,
+        f"Страниц: WB {config.wb_max_search_pages}, Яндекс {config.ym_max_search_pages}"
     )
 
 
@@ -161,13 +162,30 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await ensure_admin(update, context):
         return
     try:
-        target = parse_add_args(update.effective_message.text or "")
+        target = parse_add_args(update.effective_message.text or "", marketplace="wb")
     except (TypeError, ValueError) as error:
         await update.effective_message.reply_text(str(error))
         return
     conn = connect(db_path(context))
     saved = upsert_target(conn, target)
-    await update.effective_message.reply_text(f"Сохранено: id={saved.id}, nm_id={saved.nm_id}")
+    await update.effective_message.reply_text(
+        f"Сохранено: id={saved.id}, площадка={saved.marketplace_label()}, карточка={saved.product_id()}"
+    )
+
+
+async def add_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    try:
+        target = parse_add_args(update.effective_message.text or "", marketplace="ym")
+    except (TypeError, ValueError) as error:
+        await update.effective_message.reply_text(str(error))
+        return
+    conn = connect(db_path(context))
+    saved = upsert_target(conn, target)
+    await update.effective_message.reply_text(
+        f"Сохранено: id={saved.id}, площадка={saved.marketplace_label()}, карточка={saved.product_id()}"
+    )
 
 
 async def list_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,14 +196,21 @@ async def list_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not targets:
         await update.effective_message.reply_text("Активных карточек пока нет.")
         return
-    lines = [f"{target.nm_id or target.id}: {target.search_query}" for target in targets[:50]]
+    lines = [
+        f"{target.id}: [{target.marketplace_label()}] {target.product_id() or '-'} | {target.search_query}"
+        for target in targets[:50]
+    ]
     if len(targets) > 50:
         lines.append(f"...и еще {len(targets) - 50}")
     await update.effective_message.reply_text("\n".join(lines))
 
 
 def target_by_number(conn, value: int) -> ProductTarget | None:
-    return get_target_by_nm_id(conn, value) or get_target_by_id(conn, value)
+    return (
+        get_target_by_id(conn, value)
+        or get_target_by_nm_id(conn, value)
+        or get_target_by_external_id(conn, "ym", str(value))
+    )
 
 
 async def set_active_command(update: Update, context: ContextTypes.DEFAULT_TYPE, active: bool) -> None:
@@ -234,24 +259,21 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("ID должен быть числом.")
         return
     conn = connect(db_path(context))
-    target = get_target_by_nm_id(conn, value)
-    if not target:
-        from .db import get_target_by_id
-
-        target = get_target_by_id(conn, value)
+    target = target_by_number(conn, value)
     if not target:
         await update.effective_message.reply_text("Карточка не найдена в базе.")
         return
-    await update.effective_message.reply_text("Проверяю выдачу WB...")
+    await update.effective_message.reply_text(f"Проверяю выдачу {target.marketplace_label()}...")
+    config: Config = context.application.bot_data["config"]
     try:
         analysis = await asyncio.to_thread(
             analyze_target,
             target,
-            wb_client(context),
-            context.application.bot_data["config"].wb_max_search_pages,
+            client_for_target(context, target),
+            max_pages_for_target(config, target),
         )
-    except WildberriesError as error:
-        await update.effective_message.reply_text(f"Ошибка WB: {error}")
+    except (WildberriesError, YandexMarketError) as error:
+        await update.effective_message.reply_text(f"Ошибка {target.marketplace_label()}: {error}")
         return
     save_position_check(conn, analysis, check_source="manual")
     await update.effective_message.reply_text(format_analysis(analysis), disable_web_page_preview=True)
@@ -266,7 +288,7 @@ async def checkall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def chart_path(context: ContextTypes.DEFAULT_TYPE, prefix: str, target: ProductTarget, suffix: str) -> Path:
     database_path = Path(db_path(context))
     reports_dir = database_path.parent / "reports"
-    raw_id = str(target.nm_id or target.id or target.sku or "target")
+    raw_id = f"{target.marketplace}-{target.product_id() or target.id or target.sku or 'target'}"
     safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw_id)
     return reports_dir / f"{prefix}-{safe_id}-{suffix}.png"
 
@@ -282,11 +304,7 @@ async def target_from_first_arg(update: Update, context: ContextTypes.DEFAULT_TY
         await update.effective_message.reply_text("ID должен быть числом.")
         return None
     conn = connect(db_path(context))
-    target = get_target_by_nm_id(conn, value)
-    if not target:
-        from .db import get_target_by_id
-
-        target = get_target_by_id(conn, value)
+    target = target_by_number(conn, value)
     if not target:
         await update.effective_message.reply_text("Карточка не найдена в базе.")
         return None
@@ -318,7 +336,7 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             points,
             output,
             week_range,
-            max_search_pages=config.wb_max_search_pages,
+            max_search_pages=max_pages_for_target(config, target),
         )
     except RuntimeError as error:
         await update.effective_message.reply_text(f"Не удалось построить график: {error}")
@@ -353,8 +371,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             target,
             points,
             output,
-            title="WB all-time positions",
-            subtitle=target.search_query,
+            title=f"{target.marketplace_label()}: позиции за все время",
+            subtitle=f"{target.search_query} | {target.label()}",
         )
     except RuntimeError as error:
         await update.effective_message.reply_text(f"Не удалось построить график: {error}")
@@ -396,13 +414,24 @@ async def run_checks_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         await context.bot.send_message(chat_id=chat_id, text="Нет активных карточек для проверки.")
         return
 
-    client = wb_client(context)
+    clients = {
+        "wb": wb_client(context),
+        "ym": ym_client(context),
+    }
     analyses = []
     for target in targets:
         try:
-            analysis = await asyncio.to_thread(analyze_target, target, client, config.wb_max_search_pages)
-        except WildberriesError as error:
-            await context.bot.send_message(chat_id=chat_id, text=f"Ошибка WB для {target.search_query}: {error}")
+            analysis = await asyncio.to_thread(
+                analyze_target,
+                target,
+                clients[target.marketplace],
+                max_pages_for_target(config, target),
+            )
+        except (WildberriesError, YandexMarketError) as error:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Ошибка {target.marketplace_label()} для {target.search_query}: {error}",
+            )
             continue
         save_position_check(conn, analysis, check_source="auto" if auto else "manual")
         analyses.append(analysis)
@@ -489,6 +518,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("addym", add_yandex))
     app.add_handler(CommandHandler("list", list_targets))
     app.add_handler(CommandHandler("disable", disable))
     app.add_handler(CommandHandler("enable", enable))

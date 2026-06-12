@@ -171,14 +171,14 @@ def format_history_summary(target: ProductTarget, points: list[PositionPoint], t
 
 
 def format_all_targets_summary(conn: sqlite3.Connection, targets: list[ProductTarget], tz: ZoneInfo) -> str:
-    lines = ["Общая статистика WB"]
+    lines = ["Общая статистика маркетплейсов"]
     if not targets:
         return "В базе пока нет карточек."
     for target in targets:
         points = load_position_history(conn, target, tz)
         summary = summarize_history(points)
         lines.append(
-            f"\n{target.nm_id or target.id}: {target.search_query}\n"
+            f"\n[{target.marketplace_label()}] {target.product_id() or target.id}: {target.search_query}\n"
             f"Проверок: {summary.total_checks}, "
             f"последняя: {position_label(summary.last_position)}, "
             f"лучшая: {position_label(summary.best_position)}, "
@@ -303,8 +303,6 @@ def render_week_position_chart(
     image = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(image)
 
-    font_title = _font(38, bold=True)
-    font_title_small = _font(34, bold=True)
     font_subtitle = _font(22)
     font_label = _font(20, bold=True)
     font_small = _font(18)
@@ -314,15 +312,24 @@ def render_week_position_chart(
     note_box = (842, 70, width - 62, 158)
     left_margin = 54
     supplier = (target.own_supplier_name or target.label()).strip() or "магазина"
-    title = f"Позиция карточки фирмы {supplier} на WB за неделю"
-    title_font = font_title
-    if draw.textbbox((0, 0), title, font=title_font)[2] > note_box[0] - left_margin - 28:
-        title_font = font_title_small
+    marketplace_name = "Яндекс Маркете" if target.marketplace == "ym" else "WB"
+    title = f"Позиция карточки фирмы {supplier} на {marketplace_name} за неделю"
+    title_font = _fit_font(draw, title, 38, 26, width - left_margin * 2, bold=True)
     draw.text((left_margin, 28), title, fill=ink, font=title_font)
     draw.text((left_margin, 92), f"Запрос: {target.search_query}", fill=muted, font=font_subtitle)
     draw.text((left_margin, 123), f"Карточка: {target.label()} | {week_range.label()}", fill=muted, font=font_subtitle)
 
-    _draw_explanation_note(draw, note_box, max_search_pages, red, red_border, ink, font_small, font_note)
+    _draw_explanation_note(
+        draw,
+        note_box,
+        max_search_pages,
+        "Яндекс Маркета" if target.marketplace == "ym" else "WB",
+        red,
+        red_border,
+        ink,
+        font_small,
+        font_note,
+    )
     _draw_pill(draw, (54, 160), "точка = позиция", point_color, font_small)
     _draw_pill(draw, (274, 160), "крестик = не найдена", red, font_small)
     draw.text(
@@ -413,6 +420,22 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
     )
 
 
+def _fit_font(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    start_size: int,
+    minimum_size: int,
+    max_width: int,
+    bold: bool = False,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for size in range(start_size, minimum_size - 1, -1):
+        candidate = _font(size, bold=bold)
+        box = draw.textbbox((0, 0), text, font=candidate)
+        if box[2] - box[0] <= max_width:
+            return candidate
+    return _font(minimum_size, bold=bold)
+
+
 def _font_supports_cyrillic(font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> bool:
     try:
         cyrillic = bytes(font.getmask("Бухгалтерия"))
@@ -496,6 +519,7 @@ def _draw_explanation_note(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
     max_search_pages: int,
+    marketplace_name: str,
     red: str,
     border: str,
     ink: str,
@@ -514,7 +538,7 @@ def _draw_explanation_note(
     )
     draw.text(
         (center_x, box[1] + 65),
-        f"{max_search_pages} страницах WB",
+        f"{max_search_pages} страницах {marketplace_name}",
         fill=ink,
         font=font_body,
         anchor="mm",

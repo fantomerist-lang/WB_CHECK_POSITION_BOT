@@ -16,16 +16,20 @@ def normalize_name(value: str) -> str:
 
 
 def target_identity_warning(target: ProductTarget) -> str | None:
+    if target.external_id:
+        return None
     if target.nm_id:
         return None
     if target.own_supplier_id:
-        return "Карточка ищется по ID продавца, а не по nm_id. Если у магазина несколько карточек в выдаче, позиция может быть не той карточкой."
+        return "Карточка ищется по ID продавца, а не по ID товара. Если у магазина несколько карточек, позиция может быть неточной."
     if target.own_supplier_name:
-        return "Карточка ищется по названию магазина, а не по nm_id. Лучше добавить nm_id карточки."
-    return "Не задан nm_id, ID продавца или название магазина. Свою карточку невозможно надежно найти."
+        return "Карточка ищется по названию магазина, а не по ID товара. Лучше добавить точный ID карточки."
+    return "Не задан ID карточки, ID продавца или название магазина. Свою карточку невозможно надежно найти."
 
 
 def match_target(item: SearchResultItem, target: ProductTarget) -> tuple[bool, str]:
+    if target.external_id and target.external_id in {item.external_id, str(item.nm_id or "")}:
+        return True, "external_id"
     if target.nm_id and item.nm_id == target.nm_id:
         return True, "nm_id"
     if target.own_supplier_id and item.supplier_id == target.own_supplier_id:
@@ -57,7 +61,7 @@ def analyze_target(
     own_item: SearchResultItem | None = None
     match_reason = ""
     rank = 0
-    seen_nm_ids: set[int] = set()
+    seen_items: set[str] = set()
     pages_checked = 0
 
     for page in range(1, max(max_pages, 1) + 1):
@@ -67,9 +71,10 @@ def analyze_target(
             break
 
         for product in products:
-            if product.nm_id in seen_nm_ids:
+            identity = product.identity_key()
+            if identity in seen_items:
                 continue
-            seen_nm_ids.add(product.nm_id)
+            seen_items.add(identity)
             rank += 1
             ranked = replace(product, rank=rank)
             if len(top_items) < top_limit:

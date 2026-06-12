@@ -11,6 +11,8 @@ def utc_now_iso() -> str:
 @dataclass(frozen=True)
 class ProductTarget:
     id: int | None = None
+    marketplace: str = "wb"
+    external_id: str = ""
     nm_id: int | None = None
     sku: str = ""
     name: str = ""
@@ -20,9 +22,17 @@ class ProductTarget:
     note: str = ""
     active: bool = True
 
+    def marketplace_label(self) -> str:
+        return "Яндекс Маркет" if self.marketplace == "ym" else "Wildberries"
+
+    def product_id(self) -> str:
+        return self.external_id or (str(self.nm_id) if self.nm_id else "")
+
     def label(self) -> str:
         if self.name:
             return self.name
+        if self.marketplace == "ym" and self.external_id:
+            return f"Яндекс Маркет {self.external_id}"
         if self.nm_id:
             return f"WB {self.nm_id}"
         return self.search_query
@@ -31,8 +41,9 @@ class ProductTarget:
 @dataclass(frozen=True)
 class SearchResultItem:
     rank: int
-    nm_id: int
-    name: str
+    nm_id: int = 0
+    external_id: str = ""
+    name: str = ""
     brand: str = ""
     supplier_id: int | None = None
     supplier_name: str = ""
@@ -42,11 +53,18 @@ class SearchResultItem:
     feedbacks: int | None = None
     url: str = ""
 
+    def identity_key(self) -> str:
+        if self.external_id:
+            return self.external_id
+        if self.nm_id:
+            return str(self.nm_id)
+        return self.url or self.name
+
     def seller_label(self) -> str:
         if self.supplier_name:
             return self.supplier_name
         if self.supplier_id:
-            return str(self.supplier_id)
+            return f"ID {self.supplier_id}"
         return "не указан"
 
 

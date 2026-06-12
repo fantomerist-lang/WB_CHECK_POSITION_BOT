@@ -38,6 +38,15 @@ class Config:
     wb_proxy_url: str
     wb_proxy_auth_token: str
     wb_proxy_insecure_ssl: bool
+    ym_region_id: int
+    ym_max_search_pages: int
+    ym_request_delay_seconds: float
+    ym_request_delay_jitter_seconds: float
+    ym_request_retries: int
+    ym_proxy_url: str
+    ym_proxy_auth_token: str
+    ym_proxy_insecure_ssl: bool
+    ym_enrich_sellers: bool
     request_timeout: float
 
 
@@ -98,6 +107,10 @@ def get_config(require_telegram: bool = True) -> Config:
 
     times = _report_times(os.getenv("REPORT_TIMES", "09:00"))
 
+    wb_proxy_url = os.getenv("WB_PROXY_URL", "").strip()
+    wb_proxy_auth_token = os.getenv("WB_PROXY_AUTH_TOKEN", "").strip()
+    wb_proxy_insecure_ssl = _bool_env("WB_PROXY_INSECURE_SSL", False)
+
     return Config(
         telegram_token=token,
         admin_chat_id=_chat_id(os.getenv("ADMIN_CHAT_ID")),
@@ -114,8 +127,17 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_request_delay_jitter_seconds=_float_env("WB_REQUEST_DELAY_JITTER_SECONDS", 3.0),
         wb_request_retries=_int_env("WB_REQUEST_RETRIES", 4, minimum=1),
         wb_429_cooldown_seconds=_float_env("WB_429_COOLDOWN_SECONDS", 15.0),
-        wb_proxy_url=os.getenv("WB_PROXY_URL", "").strip(),
-        wb_proxy_auth_token=os.getenv("WB_PROXY_AUTH_TOKEN", "").strip(),
-        wb_proxy_insecure_ssl=_bool_env("WB_PROXY_INSECURE_SSL", False),
+        wb_proxy_url=wb_proxy_url,
+        wb_proxy_auth_token=wb_proxy_auth_token,
+        wb_proxy_insecure_ssl=wb_proxy_insecure_ssl,
+        ym_region_id=_int_env("YM_REGION_ID", 213, minimum=1),
+        ym_max_search_pages=_int_env("YM_MAX_SEARCH_PAGES", 20, minimum=1),
+        ym_request_delay_seconds=_float_env("YM_REQUEST_DELAY_SECONDS", 2.0),
+        ym_request_delay_jitter_seconds=_float_env("YM_REQUEST_DELAY_JITTER_SECONDS", 3.0),
+        ym_request_retries=_int_env("YM_REQUEST_RETRIES", 4, minimum=1),
+        ym_proxy_url=os.getenv("YM_PROXY_URL", "").strip() or wb_proxy_url,
+        ym_proxy_auth_token=os.getenv("YM_PROXY_AUTH_TOKEN", "").strip() or wb_proxy_auth_token,
+        ym_proxy_insecure_ssl=_bool_env("YM_PROXY_INSECURE_SSL", wb_proxy_insecure_ssl),
+        ym_enrich_sellers=_bool_env("YM_ENRICH_SELLERS", True),
         request_timeout=_float_env("REQUEST_TIMEOUT", 60.0),
     )

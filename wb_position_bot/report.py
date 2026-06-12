@@ -28,6 +28,7 @@ def position_text(analysis: PositionAnalysis) -> str:
 
 def format_analysis(analysis: PositionAnalysis) -> str:
     lines = [
+        f"Площадка: {analysis.target.marketplace_label()}",
         f"Запрос: {analysis.query}",
         f"Карточка: {analysis.target.label()}",
         f"Позиция твоей карточки: {position_text(analysis)}",
@@ -56,17 +57,18 @@ def format_analysis(analysis: PositionAnalysis) -> str:
 def format_full_report_messages(analyses: list[PositionAnalysis]) -> list[str]:
     if not analyses:
         return []
-    messages = [f"Отчет WB по позициям\nПроверено запросов: {len(analyses)}"]
+    marketplaces = ", ".join(dict.fromkeys(item.target.marketplace_label() for item in analyses))
+    messages = [f"Отчет по позициям: {marketplaces}\nПроверено запросов: {len(analyses)}"]
     for index, analysis in enumerate(analyses, start=1):
         messages.append(f"Запрос {index}/{len(analyses)}\n\n{format_analysis(analysis)}")
     return messages
 
 
 def format_short_summary(analyses: list[PositionAnalysis]) -> str:
-    lines = ["Отчет WB по позициям"]
+    lines = ["Отчет по позициям маркетплейсов"]
     for analysis in analyses:
         lines.append(
-            f"\n{analysis.query}\n"
+            f"\n[{analysis.target.marketplace_label()}] {analysis.query}\n"
             f"Позиция: {position_text(analysis)}\n"
             f"Топ-5 выдачи:\n{format_short_top_items(analysis.top_items)}"
         )

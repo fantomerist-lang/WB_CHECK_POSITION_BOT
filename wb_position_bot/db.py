@@ -26,6 +26,8 @@ def migrate(conn: sqlite3.Connection) -> None:
 
         create table if not exists tracked_products (
           id integer primary key autoincrement,
+          marketplace text not null default 'wb',
+          external_id text not null default '',
           nm_id integer,
           sku text not null default '',
           name text not null default '',
@@ -37,10 +39,6 @@ def migrate(conn: sqlite3.Connection) -> None:
           created_at text not null default current_timestamp,
           updated_at text not null default current_timestamp
         );
-
-        create unique index if not exists idx_tracked_products_nm_id
-          on tracked_products(nm_id)
-          where nm_id is not null;
 
         create index if not exists idx_tracked_products_sku on tracked_products(sku);
         create index if not exists idx_tracked_products_active on tracked_products(active);
@@ -65,7 +63,23 @@ def migrate(conn: sqlite3.Connection) -> None:
           on position_checks(product_id, checked_at);
         """
     )
+    ensure_column(conn, "tracked_products", "marketplace", "text not null default 'wb'")
+    ensure_column(conn, "tracked_products", "external_id", "text not null default ''")
     ensure_column(conn, "position_checks", "check_source", "text not null default 'manual'")
+    conn.execute("update tracked_products set marketplace = 'wb' where marketplace is null or marketplace = ''")
+    conn.execute(
+        "update tracked_products set external_id = cast(nm_id as text) "
+        "where marketplace = 'wb' and nm_id is not null and external_id = ''"
+    )
+    conn.execute("drop index if exists idx_tracked_products_nm_id")
+    conn.execute(
+        "create unique index if not exists idx_tracked_products_wb_nm_id "
+        "on tracked_products(nm_id) where marketplace = 'wb' and nm_id is not null"
+    )
+    conn.execute(
+        "create unique index if not exists idx_tracked_products_market_external "
+        "on tracked_products(marketplace, external_id) where external_id != ''"
+    )
     conn.commit()
 
 
@@ -92,6 +106,8 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
 def row_to_target(row: sqlite3.Row) -> ProductTarget:
     return ProductTarget(
         id=int(row["id"]),
+        marketplace=str(row["marketplace"] or "wb"),
+        external_id=str(row["external_id"] or ""),
         nm_id=int(row["nm_id"]) if row["nm_id"] is not None else None,
         sku=str(row["sku"] or ""),
         name=str(row["name"] or ""),
@@ -117,7 +133,21 @@ def get_target_by_id(conn: sqlite3.Connection, target_id: int) -> ProductTarget 
 
 
 def get_target_by_nm_id(conn: sqlite3.Connection, nm_id: int) -> ProductTarget | None:
-    row = conn.execute("select * from tracked_products where nm_id = ?", (nm_id,)).fetchone()
+    row = conn.execute(
+        "select * from tracked_products where marketplace = 'wb' and nm_id = ?", (nm_id,)
+    ).fetchone()
+    return row_to_target(row) if row else None
+
+
+def get_target_by_external_id(
+    conn: sqlite3.Connection,
+    marketplace: str,
+    external_id: str,
+) -> ProductTarget | None:
+    row = conn.execute(
+        "select * from tracked_products where marketplace = ? and external_id = ?",
+        (marketplace, str(external_id)),
+    ).fetchone()
     return row_to_target(row) if row else None
 
 
@@ -143,12 +173,24 @@ def set_target_active(conn: sqlite3.Connection, target_id: int, active: bool) ->
 def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int | None:
     if target.id:
         return target.id
-    if target.nm_id:
-        row = conn.execute("select id from tracked_products where nm_id = ?", (target.nm_id,)).fetchone()
+    if target.external_id:
+        row = conn.execute(
+            "select id from tracked_products where marketplace = ? and external_id = ?",
+            (target.marketplace, target.external_id),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+    if target.marketplace == "wb" and target.nm_id:
+        row = conn.execute(
+            "select id from tracked_products where marketplace = 'wb' and nm_id = ?", (target.nm_id,)
+        ).fetchone()
         if row:
             return int(row["id"])
     if target.sku:
-        row = conn.execute("select id from tracked_products where sku = ? and sku != ''", (target.sku,)).fetchone()
+        row = conn.execute(
+            "select id from tracked_products where marketplace = ? and sku = ? and sku != ''",
+            (target.marketplace, target.sku),
+        ).fetchone()
         if row:
             return int(row["id"])
     if target.search_query:
@@ -156,12 +198,13 @@ def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int 
             """
             select id
             from tracked_products
-            where lower(search_query) = lower(?)
+            where marketplace = ?
+              and lower(search_query) = lower(?)
               and lower(own_supplier_name) = lower(?)
             order by id
             limit 1
             """,
-            (target.search_query, target.own_supplier_name),
+            (target.marketplace, target.search_query, target.own_supplier_name),
         ).fetchone()
         if row:
             return int(row["id"])
@@ -170,10 +213,19 @@ def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int 
 
 def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTarget:
     existing_id = _existing_target_id(conn, target)
+    default_name = (
+        f"Яндекс Маркет {target.external_id}"
+        if target.marketplace == "ym" and target.external_id
+        else f"WB {target.nm_id}"
+        if target.nm_id
+        else target.search_query
+    )
     values = (
+        target.marketplace,
+        target.external_id or (str(target.nm_id) if target.marketplace == "wb" and target.nm_id else ""),
         target.nm_id,
         target.sku or (str(target.nm_id) if target.nm_id else ""),
-        target.name or (f"WB {target.nm_id}" if target.nm_id else target.search_query),
+        target.name or default_name,
         target.search_query,
         target.own_supplier_id,
         target.own_supplier_name,
@@ -184,7 +236,9 @@ def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTar
         conn.execute(
             """
             update tracked_products
-            set nm_id = ?,
+            set marketplace = ?,
+                external_id = ?,
+                nm_id = ?,
                 sku = ?,
                 name = ?,
                 search_query = ?,
@@ -205,8 +259,9 @@ def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTar
     cursor = conn.execute(
         """
         insert into tracked_products(
-          nm_id, sku, name, search_query, own_supplier_id, own_supplier_name, note, active
-        ) values (?, ?, ?, ?, ?, ?, ?, ?)
+          marketplace, external_id, nm_id, sku, name, search_query,
+          own_supplier_id, own_supplier_name, note, active
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         values,
     )
