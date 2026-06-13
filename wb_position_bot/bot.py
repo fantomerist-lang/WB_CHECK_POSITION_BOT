@@ -108,6 +108,41 @@ async def ensure_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     return False
 
 
+HELP_TEXT = """Команды бота:
+
+/start - запустить и привязать бота
+/help - показать все команды
+/status - состояние базы и расписания
+
+/add ID | запрос | Магазин - добавить запрос Wildberries
+/addym ID или ссылка | запрос | Магазин - добавить запрос Яндекс Маркета
+/list - показать активные запросы и их ID
+/disable ID - временно остановить запрос
+/enable ID - снова включить запрос
+/delete ID - удалить запрос из отслеживания, сохранив историю
+
+/check ID - вручную проверить один запрос
+/checkall - вручную проверить все активные запросы
+
+/week ID - недельный график одного запроса
+/weekwb - недельный график всех запросов Wildberries
+/weekym - недельный график всех запросов Яндекс Маркета
+
+/stats - краткая статистика всех запросов
+/stats ID - график одного запроса за всё время
+/statswb - общий график Wildberries за всё время
+/statsym - общий график Яндекс Маркета за всё время
+
+ID записи можно узнать командой /list."""
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    if update.effective_message:
+        await update.effective_message.reply_text(HELP_TEXT)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     if not chat or not update.effective_message:
@@ -127,23 +162,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         set_setting(conn, "admin_chat_id", str(chat.id))
 
-    await update.effective_message.reply_text(
-        "Готов. Команды:\n"
-        "/status - состояние базы\n"
-        "/add 123456789 | запрос | Магазин - добавить Wildberries\n"
-        "/addym 103705469335 | запрос | Магазин - добавить Яндекс Маркет\n"
-        "/list - список карточек\n"
-        "/delete 1 - убрать запрос из отслеживания, сохранив историю\n"
-        "/check 1 - проверить запись по id из /list\n"
-        "/checkall - проверить все активные карточки\n"
-        "/week 1 - график текущей недели по id из /list\n"
-        "/weekwb - все запросы WB за текущую неделю\n"
-        "/weekym - все запросы Яндекс Маркета за текущую неделю\n"
-        "/stats 1 - статистика за все время по id из /list\n"
-        "/statswb - все запросы WB за все время\n"
-        "/statsym - все запросы Яндекс Маркета за все время\n"
-        "/stats - краткая статистика по всем карточкам"
-    )
+    await update.effective_message.reply_text(f"Готов.\n\n{HELP_TEXT}")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -688,6 +707,7 @@ def main() -> None:
     connect(config.database_path).close()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("addym", add_yandex))
