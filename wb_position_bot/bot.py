@@ -10,11 +10,13 @@ from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from .analytics import (
+    PositionSeries,
     current_week_range,
     format_all_targets_summary,
     format_history_summary,
     load_position_history,
     render_position_chart,
+    render_marketplace_overview_chart,
     render_week_position_chart,
 )
 from .analyzer import analyze_target
@@ -131,10 +133,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/add 123456789 | запрос | Магазин - добавить Wildberries\n"
         "/addym 103705469335 | запрос | Магазин - добавить Яндекс Маркет\n"
         "/list - список карточек\n"
+        "/delete 1 - убрать запрос из отслеживания, сохранив историю\n"
         "/check 1 - проверить запись по id из /list\n"
         "/checkall - проверить все активные карточки\n"
         "/week 1 - график текущей недели по id из /list\n"
+        "/weekwb - все запросы WB за текущую неделю\n"
+        "/weekym - все запросы Яндекс Маркета за текущую неделю\n"
         "/stats 1 - статистика за все время по id из /list\n"
+        "/statswb - все запросы WB за все время\n"
+        "/statsym - все запросы Яндекс Маркета за все время\n"
         "/stats - краткая статистика по всем карточкам"
     )
 
@@ -246,6 +253,37 @@ async def enable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await set_active_command(update, context, active=True)
 
 
+async def delete_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Напиши /delete ID из /list.")
+        return
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.effective_message.reply_text("ID должен быть числом.")
+        return
+
+    conn = connect(db_path(context))
+    target = get_target_by_id(conn, target_id)
+    if not target:
+        await update.effective_message.reply_text("Запрос с таким id не найден в базе.")
+        return
+    if not target.active:
+        await update.effective_message.reply_text(
+            f"Запрос {target.id} уже удалён из отслеживания. Его история сохранена."
+        )
+        return
+
+    set_target_active(conn, target_id, False)
+    await update.effective_message.reply_text(
+        f"Запрос удалён из ежедневного отслеживания: {target.search_query}\n"
+        "Собранная история сохранена и останется на недельных и общих графиках до даты удаления."
+    )
+
+
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await ensure_admin(update, context):
         return
@@ -291,6 +329,113 @@ def chart_path(context: ContextTypes.DEFAULT_TYPE, prefix: str, target: ProductT
     raw_id = f"{target.marketplace}-{target.product_id() or target.id or target.sku or 'target'}"
     safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw_id)
     return reports_dir / f"{prefix}-{safe_id}-{suffix}.png"
+
+
+def marketplace_chart_path(
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str,
+    marketplace: str,
+    suffix: str,
+) -> Path:
+    database_path = Path(db_path(context))
+    reports_dir = database_path.parent / "reports"
+    return reports_dir / f"{prefix}-{marketplace}-{suffix}.png"
+
+
+def marketplace_series(
+    conn,
+    targets: list[ProductTarget],
+    config: Config,
+    marketplace: str,
+    start=None,
+    end=None,
+) -> list[PositionSeries]:
+    result: list[PositionSeries] = []
+    for target in targets:
+        if target.marketplace != marketplace:
+            continue
+        points = load_position_history(
+            conn,
+            target,
+            config.timezone,
+            start=start,
+            end=end,
+            check_source="auto",
+        )
+        result.append(PositionSeries(target=target, points=points))
+    return result
+
+
+async def send_marketplace_overview(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    marketplace: str,
+    all_time: bool = False,
+    notify_if_empty: bool = True,
+) -> bool:
+    config: Config = context.application.bot_data["config"]
+    conn = connect(config.database_path)
+    targets = active_targets(conn, include_inactive=True)
+    marketplace_targets = [target for target in targets if target.marketplace == marketplace]
+    marketplace_label = "Яндекс Маркет" if marketplace == "ym" else "Wildberries"
+    if not marketplace_targets:
+        if notify_if_empty:
+            await safe_send_message(context, chat_id, f"Нет активных запросов для {marketplace_label}.")
+        return False
+
+    if all_time:
+        series = marketplace_series(conn, marketplace_targets, config, marketplace)
+        output = marketplace_chart_path(context, "stats", marketplace, "all-time")
+        period_title = "Статистика за все время"
+        x_start = None
+        x_end = None
+        suffix = "за все время"
+    else:
+        week_range = current_week_range(config.timezone)
+        series = marketplace_series(
+            conn,
+            marketplace_targets,
+            config,
+            marketplace,
+            start=week_range.start,
+            end=week_range.end,
+        )
+        output = marketplace_chart_path(context, "week", marketplace, week_range.key)
+        period_title = f"Неделя {week_range.label()}"
+        x_start = week_range.start
+        x_end = week_range.end
+        suffix = "за текущую неделю"
+
+    series = [item for item in series if item.target.active or item.points]
+    if not series:
+        if notify_if_empty:
+            await safe_send_message(context, chat_id, f"Пока нет сохранённых проверок для {marketplace_label}.")
+        return False
+
+    try:
+        render_marketplace_overview_chart(
+            series,
+            output,
+            marketplace=marketplace,
+            period_title=period_title,
+            x_start=x_start,
+            x_end=x_end,
+            weekly=not all_time,
+            max_search_pages=(
+                config.ym_max_search_pages if marketplace == "ym" else config.wb_max_search_pages
+            ),
+        )
+    except RuntimeError as error:
+        await safe_send_message(context, chat_id, f"Не удалось построить график {marketplace_label}: {error}")
+        return False
+
+    await safe_send_photo(
+        context,
+        chat_id,
+        output,
+        caption=f"{marketplace_label}: все поисковые запросы {suffix}",
+    )
+    return True
 
 
 async def target_from_first_arg(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> ProductTarget | None:
@@ -349,6 +494,18 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_send_photo(context, update.effective_chat.id, output, caption="График текущей недели")
 
 
+async def week_wb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    await send_marketplace_overview(context, update.effective_chat.id, "wb")
+
+
+async def week_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    await send_marketplace_overview(context, update.effective_chat.id, "ym")
+
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await ensure_admin(update, context):
         return
@@ -383,6 +540,18 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         format_history_summary(target, points, "Статистика за все время"),
     )
     await safe_send_photo(context, update.effective_chat.id, output, caption="График за все время")
+
+
+async def stats_wb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    await send_marketplace_overview(context, update.effective_chat.id, "wb", all_time=True)
+
+
+async def stats_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    await send_marketplace_overview(context, update.effective_chat.id, "ym", all_time=True)
 
 
 def should_run_auto_report(conn, config: Config) -> bool:
@@ -436,10 +605,13 @@ async def run_checks_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         save_position_check(conn, analysis, check_source="auto" if auto else "manual")
         analyses.append(analysis)
 
-    if not analyses:
-        return
-    for message in format_full_report_messages(analyses):
-        await safe_send_message(context, chat_id, message, disable_web_page_preview=True)
+    if analyses:
+        for message in format_full_report_messages(analyses):
+            await safe_send_message(context, chat_id, message, disable_web_page_preview=True)
+
+    if auto:
+        await send_marketplace_overview(context, chat_id, "wb", notify_if_empty=False)
+        await send_marketplace_overview(context, chat_id, "ym", notify_if_empty=False)
 
 
 async def safe_send_message(
@@ -522,10 +694,15 @@ def main() -> None:
     app.add_handler(CommandHandler("list", list_targets))
     app.add_handler(CommandHandler("disable", disable))
     app.add_handler(CommandHandler("enable", enable))
+    app.add_handler(CommandHandler("delete", delete_query))
     app.add_handler(CommandHandler("check", check))
     app.add_handler(CommandHandler("checkall", checkall))
     app.add_handler(CommandHandler("week", week))
+    app.add_handler(CommandHandler("weekwb", week_wb))
+    app.add_handler(CommandHandler("weekym", week_yandex))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("statswb", stats_wb))
+    app.add_handler(CommandHandler("statsym", stats_yandex))
 
     schedule_reports(app, config)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

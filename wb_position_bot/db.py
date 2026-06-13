@@ -72,13 +72,11 @@ def migrate(conn: sqlite3.Connection) -> None:
         "where marketplace = 'wb' and nm_id is not null and external_id = ''"
     )
     conn.execute("drop index if exists idx_tracked_products_nm_id")
+    conn.execute("drop index if exists idx_tracked_products_wb_nm_id")
+    conn.execute("drop index if exists idx_tracked_products_market_external")
     conn.execute(
-        "create unique index if not exists idx_tracked_products_wb_nm_id "
-        "on tracked_products(nm_id) where marketplace = 'wb' and nm_id is not null"
-    )
-    conn.execute(
-        "create unique index if not exists idx_tracked_products_market_external "
-        "on tracked_products(marketplace, external_id) where external_id != ''"
+        "create unique index if not exists idx_tracked_products_market_external_query "
+        "on tracked_products(marketplace, external_id, lower(search_query)) where external_id != ''"
     )
     conn.commit()
 
@@ -134,7 +132,8 @@ def get_target_by_id(conn: sqlite3.Connection, target_id: int) -> ProductTarget 
 
 def get_target_by_nm_id(conn: sqlite3.Connection, nm_id: int) -> ProductTarget | None:
     row = conn.execute(
-        "select * from tracked_products where marketplace = 'wb' and nm_id = ?", (nm_id,)
+        "select * from tracked_products where marketplace = 'wb' and nm_id = ? order by id limit 1",
+        (nm_id,),
     ).fetchone()
     return row_to_target(row) if row else None
 
@@ -145,7 +144,7 @@ def get_target_by_external_id(
     external_id: str,
 ) -> ProductTarget | None:
     row = conn.execute(
-        "select * from tracked_products where marketplace = ? and external_id = ?",
+        "select * from tracked_products where marketplace = ? and external_id = ? order by id limit 1",
         (marketplace, str(external_id)),
     ).fetchone()
     return row_to_target(row) if row else None
@@ -175,25 +174,29 @@ def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int 
         return target.id
     if target.external_id:
         row = conn.execute(
-            "select id from tracked_products where marketplace = ? and external_id = ?",
-            (target.marketplace, target.external_id),
+            "select id from tracked_products "
+            "where marketplace = ? and external_id = ? and lower(search_query) = lower(?)",
+            (target.marketplace, target.external_id, target.search_query),
         ).fetchone()
         if row:
             return int(row["id"])
     if target.marketplace == "wb" and target.nm_id:
         row = conn.execute(
-            "select id from tracked_products where marketplace = 'wb' and nm_id = ?", (target.nm_id,)
+            "select id from tracked_products "
+            "where marketplace = 'wb' and nm_id = ? and lower(search_query) = lower(?)",
+            (target.nm_id, target.search_query),
         ).fetchone()
         if row:
             return int(row["id"])
     if target.sku:
         row = conn.execute(
-            "select id from tracked_products where marketplace = ? and sku = ? and sku != ''",
-            (target.marketplace, target.sku),
+            "select id from tracked_products "
+            "where marketplace = ? and sku = ? and sku != '' and lower(search_query) = lower(?)",
+            (target.marketplace, target.sku, target.search_query),
         ).fetchone()
         if row:
             return int(row["id"])
-    if target.search_query:
+    if not target.external_id and not target.nm_id and target.search_query:
         row = conn.execute(
             """
             select id

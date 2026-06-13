@@ -19,6 +19,12 @@ class PositionPoint:
 
 
 @dataclass(frozen=True)
+class PositionSeries:
+    target: ProductTarget
+    points: list[PositionPoint]
+
+
+@dataclass(frozen=True)
 class WeekRange:
     start: datetime
     end: datetime
@@ -395,6 +401,187 @@ def render_week_position_chart(
     return output
 
 
+SERIES_COLORS = (
+    "#0b4f8a",
+    "#c2410c",
+    "#15803d",
+    "#7e22ce",
+    "#b91c1c",
+    "#0f766e",
+    "#a16207",
+    "#4338ca",
+    "#be185d",
+    "#0369a1",
+    "#4d7c0f",
+    "#9f1239",
+)
+
+
+def render_marketplace_overview_chart(
+    series: list[PositionSeries],
+    output_path: str | Path,
+    marketplace: str,
+    period_title: str,
+    x_start: datetime | None = None,
+    x_end: datetime | None = None,
+    weekly: bool = False,
+    max_search_pages: int = 20,
+    width: int = 1400,
+    height: int = 900,
+) -> Path:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    marketplace_label = "Яндекс Маркет" if marketplace == "ym" else "Wildberries"
+    bg = "#f8fafc"
+    ink = "#102033"
+    muted = "#64748b"
+    grid = "#d8e0ea"
+
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+    title_font = _font(38, bold=True)
+    subtitle_font = _font(21)
+    legend_font = _font(16)
+    axis_font = _font(16)
+    tiny_font = _font(13)
+    point_font = _font(14, bold=True)
+
+    draw.text(
+        (54, 28),
+        f"Позиции всех запросов: {marketplace_label}",
+        fill=ink,
+        font=title_font,
+    )
+    draw.text(
+        (56, 82),
+        f"{period_title} | Запросов: {len(series)} | Только автоматические проверки",
+        fill=muted,
+        font=subtitle_font,
+    )
+
+    legend_top = 124
+    columns = 2 if len(series) > 4 else 1
+    rows = max((len(series) + columns - 1) // columns, 1)
+    legend_row_height = 27
+    legend_height = rows * legend_row_height + 18
+    column_width = (width - 108) // columns
+    for index, item in enumerate(series):
+        column = index // rows
+        row = index % rows
+        x = 56 + column * column_width
+        y = legend_top + row * legend_row_height
+        color = SERIES_COLORS[index % len(SERIES_COLORS)]
+        draw.line((x, y + 10, x + 28, y + 10), fill=color, width=5)
+        draw.ellipse((x + 10, y + 5, x + 20, y + 15), fill=color)
+        label = f"{index + 1}. {_ellipsize(item.target.search_query, 62 if columns == 1 else 48)}"
+        draw.text((x + 38, y), label, fill=ink, font=legend_font)
+
+    chart_top = legend_top + legend_height + 28
+    left, right, bottom = 86, width - 54, height - 104
+    draw.rounded_rectangle(
+        (left, chart_top, right, bottom),
+        radius=10,
+        fill="#ffffff",
+        outline="#cbd5e1",
+        width=2,
+    )
+
+    all_points = [point for item in series for point in item.points]
+    found_positions = [point.position for point in all_points if point.position is not None]
+    y_max = max(8, max(found_positions, default=0))
+
+    if weekly and x_start and x_end:
+        week_range = WeekRange(x_start, x_end)
+        _draw_week_grid(
+            draw,
+            left,
+            chart_top,
+            right,
+            bottom,
+            week_range,
+            y_max,
+            grid,
+            muted,
+            axis_font,
+            tiny_font,
+        )
+    else:
+        if all_points:
+            x_start = x_start or min(point.checked_at for point in all_points)
+            x_end = x_end or max(point.checked_at for point in all_points)
+        now = datetime.now().astimezone()
+        x_start = x_start or now - timedelta(days=6)
+        x_end = x_end or now
+        if x_end <= x_start:
+            x_end = x_start + timedelta(days=1)
+        _draw_y_grid(draw, left, chart_top, right, bottom, y_max, grid, muted, axis_font)
+        _draw_overview_x_grid(draw, left, chart_top, right, bottom, x_start, x_end, grid, muted, tiny_font)
+
+    if not all_points:
+        message = "Пока нет сохраненных автоматических проверок"
+        box = draw.textbbox((0, 0), message, font=subtitle_font)
+        draw.text(
+            ((width - (box[2] - box[0])) / 2, (chart_top + bottom) / 2),
+            message,
+            fill=muted,
+            font=subtitle_font,
+        )
+    else:
+        last_labels: list[tuple[float, float, int, str]] = []
+        for index, item in enumerate(series):
+            color = SERIES_COLORS[index % len(SERIES_COLORS)]
+            if weekly and x_start and x_end:
+                points_by_slot = _latest_points_by_weekday(item.points, WeekRange(x_start, x_end))
+                plot_points = [
+                    (slot, point)
+                    for slot, point in enumerate(points_by_slot)
+                    if point is not None
+                ]
+                x_for_slot = lambda value: _week_x(int(value), left, right)
+            else:
+                dated = _latest_points_by_date(item.points)
+                plot_points = [(point.checked_at, point) for point in dated]
+                x_for_slot = lambda value: _scale_time(value, x_start, x_end, left, right)
+
+            previous: tuple[float, float] | None = None
+            found_marks: list[tuple[float, float, int]] = []
+            for slot, point in plot_points:
+                x = x_for_slot(slot)
+                if point.position is None:
+                    offset = ((index % 5) - 2) * 5
+                    _draw_colored_cross(draw, x + offset, bottom - 12 - (index // 5) * 10, color)
+                    previous = None
+                    continue
+                y = _scale_position(point.position, y_max, chart_top, bottom)
+                if previous:
+                    draw.line((previous[0], previous[1], x, y), fill=color, width=4)
+                previous = (x, y)
+                found_marks.append((x, y, point.position))
+
+            for x, y, position in found_marks:
+                draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=color, outline="#ffffff", width=2)
+            if len(series) <= 4:
+                for x, y, position in found_marks:
+                    label_y = y - 23 if y - 26 > chart_top else y + 12
+                    draw.text((x, label_y), f"#{position}", fill=color, font=point_font, anchor="mm")
+            elif found_marks:
+                x, y, position = found_marks[-1]
+                last_labels.append((x, y, position, color))
+
+        if last_labels:
+            _draw_resolved_last_labels(draw, last_labels, point_font, chart_top, bottom)
+
+    draw.text(
+        (left, height - 30),
+        f"Цвет = поисковый запрос. Крестик = карточка не найдена на первых {max_search_pages} страницах.",
+        fill=muted,
+        font=tiny_font,
+    )
+    image.save(output)
+    return output
+
+
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     package_dir = Path(__file__).resolve().parent
     project_root = Path(__file__).resolve().parent.parent
@@ -559,6 +746,13 @@ def _latest_points_by_weekday(points: list[PositionPoint], week_range: WeekRange
     return by_day
 
 
+def _latest_points_by_date(points: list[PositionPoint]) -> list[PositionPoint]:
+    by_date: dict[object, PositionPoint] = {}
+    for point in sorted(points, key=lambda item: item.checked_at):
+        by_date[point.checked_at.date()] = point
+    return list(by_date.values())
+
+
 def _week_x(index: int, left: int, right: int) -> float:
     return left + index * (right - left) / 6
 
@@ -590,6 +784,29 @@ def _draw_week_grid(
         draw.line((left, y, right, y), fill=grid, width=1)
         label = f"#{tick}+" if tick == y_max and y_max >= 8 else f"#{tick}"
         draw.text((28, y - 1), label, fill=muted, font=font_small, anchor="lm")
+
+
+def _draw_overview_x_grid(
+    draw: ImageDraw.ImageDraw,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    x_min: datetime,
+    x_max: datetime,
+    grid: str,
+    muted: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    span = x_max - x_min
+    span_days = max(span.total_seconds() / 86400, 1)
+    tick_count = min(7, max(2, int(span_days) + 1))
+    for index in range(tick_count):
+        ratio = index / max(tick_count - 1, 1)
+        tick = x_min + span * ratio
+        x = left + ratio * (right - left)
+        draw.line((x, top, x, bottom), fill=grid, width=1)
+        draw.text((x, bottom + 25), tick.strftime("%d.%m.%y"), fill=muted, font=font, anchor="mm")
 
 
 def _week_position_ticks(y_max: int) -> list[int]:
@@ -634,6 +851,52 @@ def _draw_position_tag(
     if y + 34 > bottom:
         offset_y = -28
     draw.text((x, y + offset_y), f"#{position}", fill=color, font=font, anchor="mm")
+
+
+def _draw_colored_cross(draw: ImageDraw.ImageDraw, x: float, y: float, color: str) -> None:
+    size = 7
+    draw.line((x - size, y - size, x + size, y + size), fill=color, width=3)
+    draw.line((x - size, y + size, x + size, y - size), fill=color, width=3)
+
+
+def _draw_resolved_last_labels(
+    draw: ImageDraw.ImageDraw,
+    labels: list[tuple[float, float, int, str]],
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    top: int,
+    bottom: int,
+) -> None:
+    ordered = sorted(labels, key=lambda item: item[1])
+    positions: list[float] = []
+    minimum_gap = 19
+    for _, y, _, _ in ordered:
+        label_y = max(y, top + 12)
+        if positions:
+            label_y = max(label_y, positions[-1] + minimum_gap)
+        positions.append(label_y)
+    overflow = positions[-1] - (bottom - 12)
+    if overflow > 0:
+        positions = [value - overflow for value in positions]
+        for index in range(len(positions) - 2, -1, -1):
+            positions[index] = min(positions[index], positions[index + 1] - minimum_gap)
+
+    for (x, _, position, color), label_y in zip(ordered, positions):
+        draw.text(
+            (x - 12, label_y),
+            f"#{position}",
+            fill=color,
+            font=font,
+            anchor="rm",
+            stroke_width=3,
+            stroke_fill="#ffffff",
+        )
+
+
+def _ellipsize(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 1)].rstrip() + "…"
 
 
 def _draw_cross(draw: ImageDraw.ImageDraw, x: float, y: float, color: str) -> None:
