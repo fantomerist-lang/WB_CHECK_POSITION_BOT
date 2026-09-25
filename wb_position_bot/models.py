@@ -11,6 +11,7 @@ def utc_now_iso() -> str:
 @dataclass(frozen=True)
 class ProductTarget:
     id: int | None = None
+    owner_chat_id: int = 0
     marketplace: str = "wb"
     external_id: str = ""
     nm_id: int | None = None
