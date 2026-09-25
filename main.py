@@ -61,6 +61,9 @@ def _client(target: ProductTarget):
         proxy_url=config.wb_proxy_url,
         proxy_auth_token=config.wb_proxy_auth_token,
         proxy_insecure_ssl=config.wb_proxy_insecure_ssl,
+        reef_api_key=config.reef_api_key,
+        reef_api_url=config.reef_api_url,
+        reef_country=config.reef_country,
     )
 
 
