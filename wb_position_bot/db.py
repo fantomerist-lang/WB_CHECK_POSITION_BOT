@@ -26,6 +26,7 @@ def migrate(conn: sqlite3.Connection) -> None:
 
         create table if not exists tracked_products (
           id integer primary key autoincrement,
+          owner_chat_id integer not null default 0,
           marketplace text not null default 'wb',
           external_id text not null default '',
           nm_id integer,
@@ -42,6 +43,14 @@ def migrate(conn: sqlite3.Connection) -> None:
 
         create index if not exists idx_tracked_products_sku on tracked_products(sku);
         create index if not exists idx_tracked_products_active on tracked_products(active);
+        create table if not exists bot_users (
+          chat_id integer primary key,
+          username text not null default '',
+          display_name text not null default '',
+          active integer not null default 1,
+          created_at text not null default current_timestamp,
+          updated_at text not null default current_timestamp
+        );
 
         create table if not exists position_checks (
           id integer primary key autoincrement,
@@ -65,7 +74,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     )
     ensure_column(conn, "tracked_products", "marketplace", "text not null default 'wb'")
     ensure_column(conn, "tracked_products", "external_id", "text not null default ''")
+    ensure_column(conn, "tracked_products", "owner_chat_id", "integer not null default 0")
     ensure_column(conn, "position_checks", "check_source", "text not null default 'manual'")
+    conn.execute("create index if not exists idx_tracked_products_owner on tracked_products(owner_chat_id)")
     conn.execute("update tracked_products set marketplace = 'wb' where marketplace is null or marketplace = ''")
     conn.execute(
         "update tracked_products set external_id = cast(nm_id as text) "
@@ -74,9 +85,11 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.execute("drop index if exists idx_tracked_products_nm_id")
     conn.execute("drop index if exists idx_tracked_products_wb_nm_id")
     conn.execute("drop index if exists idx_tracked_products_market_external")
+    conn.execute("drop index if exists idx_tracked_products_market_external_query")
     conn.execute(
         "create unique index if not exists idx_tracked_products_market_external_query "
-        "on tracked_products(marketplace, external_id, lower(search_query)) where external_id != ''"
+        "on tracked_products(owner_chat_id, marketplace, external_id, lower(search_query)) "
+        "where external_id != ''"
     )
     conn.commit()
 
@@ -101,9 +114,74 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def delete_setting(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("delete from settings where key = ?", (key,))
+    conn.commit()
+
+
+def authorize_user(conn: sqlite3.Connection, chat_id: int, username: str = "", display_name: str = "") -> None:
+    conn.execute(
+        """
+        insert into bot_users(chat_id, username, display_name, active)
+        values (?, ?, ?, 1)
+        on conflict(chat_id) do update set
+          username = excluded.username,
+          display_name = excluded.display_name,
+          active = 1,
+          updated_at = current_timestamp
+        """,
+        (int(chat_id), str(username or ""), str(display_name or "")),
+    )
+    conn.commit()
+
+
+def get_authorized_user(conn: sqlite3.Connection, chat_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "select * from bot_users where chat_id = ? and active = 1",
+        (int(chat_id),),
+    ).fetchone()
+
+
+def active_authorized_users(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "select * from bot_users where active = 1 order by created_at, chat_id"
+    ).fetchall()
+
+
+def revoke_user(conn: sqlite3.Connection, chat_id: int) -> bool:
+    cursor = conn.execute(
+        "update bot_users set active = 0, updated_at = current_timestamp where chat_id = ? and active = 1",
+        (int(chat_id),),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def claim_unowned_targets(conn: sqlite3.Connection, owner_chat_id: int) -> None:
+    conn.execute(
+        "update tracked_products set owner_chat_id = ? where owner_chat_id = 0",
+        (int(owner_chat_id),),
+    )
+    conn.commit()
+
+
+def disable_targets_for_owner(conn: sqlite3.Connection, owner_chat_id: int) -> None:
+    conn.execute(
+        """
+        update tracked_products
+        set active = 0,
+            updated_at = current_timestamp
+        where owner_chat_id = ?
+        """,
+        (int(owner_chat_id),),
+    )
+    conn.commit()
+
+
 def row_to_target(row: sqlite3.Row) -> ProductTarget:
     return ProductTarget(
         id=int(row["id"]),
+        owner_chat_id=int(row["owner_chat_id"] or 0),
         marketplace=str(row["marketplace"] or "wb"),
         external_id=str(row["external_id"] or ""),
         nm_id=int(row["nm_id"]) if row["nm_id"] is not None else None,
@@ -117,12 +195,23 @@ def row_to_target(row: sqlite3.Row) -> ProductTarget:
     )
 
 
-def active_targets(conn: sqlite3.Connection, include_inactive: bool = False) -> list[ProductTarget]:
+def active_targets(
+    conn: sqlite3.Connection,
+    include_inactive: bool = False,
+    owner_chat_id: int | None = None,
+) -> list[ProductTarget]:
     sql = "select * from tracked_products"
+    clauses: list[str] = []
+    params: list[object] = []
     if not include_inactive:
-        sql += " where active = 1"
+        clauses.append("active = 1")
+    if owner_chat_id is not None:
+        clauses.append("owner_chat_id = ?")
+        params.append(int(owner_chat_id))
+    if clauses:
+        sql += " where " + " and ".join(clauses)
     sql += " order by id"
-    return [row_to_target(row) for row in conn.execute(sql).fetchall()]
+    return [row_to_target(row) for row in conn.execute(sql, params).fetchall()]
 
 
 def get_target_by_id(conn: sqlite3.Connection, target_id: int) -> ProductTarget | None:
@@ -175,24 +264,27 @@ def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int 
     if target.external_id:
         row = conn.execute(
             "select id from tracked_products "
-            "where marketplace = ? and external_id = ? and lower(search_query) = lower(?)",
-            (target.marketplace, target.external_id, target.search_query),
+            "where owner_chat_id = ? and marketplace = ? and external_id = ? "
+            "and lower(search_query) = lower(?)",
+            (target.owner_chat_id, target.marketplace, target.external_id, target.search_query),
         ).fetchone()
         if row:
             return int(row["id"])
     if target.marketplace == "wb" and target.nm_id:
         row = conn.execute(
             "select id from tracked_products "
-            "where marketplace = 'wb' and nm_id = ? and lower(search_query) = lower(?)",
-            (target.nm_id, target.search_query),
+            "where owner_chat_id = ? and marketplace = 'wb' and nm_id = ? "
+            "and lower(search_query) = lower(?)",
+            (target.owner_chat_id, target.nm_id, target.search_query),
         ).fetchone()
         if row:
             return int(row["id"])
     if target.sku:
         row = conn.execute(
             "select id from tracked_products "
-            "where marketplace = ? and sku = ? and sku != '' and lower(search_query) = lower(?)",
-            (target.marketplace, target.sku, target.search_query),
+            "where owner_chat_id = ? and marketplace = ? and sku = ? and sku != '' "
+            "and lower(search_query) = lower(?)",
+            (target.owner_chat_id, target.marketplace, target.sku, target.search_query),
         ).fetchone()
         if row:
             return int(row["id"])
@@ -202,12 +294,13 @@ def _existing_target_id(conn: sqlite3.Connection, target: ProductTarget) -> int 
             select id
             from tracked_products
             where marketplace = ?
+              and owner_chat_id = ?
               and lower(search_query) = lower(?)
               and lower(own_supplier_name) = lower(?)
             order by id
             limit 1
             """,
-            (target.marketplace, target.search_query, target.own_supplier_name),
+            (target.marketplace, target.owner_chat_id, target.search_query, target.own_supplier_name),
         ).fetchone()
         if row:
             return int(row["id"])
@@ -224,6 +317,7 @@ def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTar
         else target.search_query
     )
     values = (
+        target.owner_chat_id,
         target.marketplace,
         target.external_id or (str(target.nm_id) if target.marketplace == "wb" and target.nm_id else ""),
         target.nm_id,
@@ -239,7 +333,8 @@ def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTar
         conn.execute(
             """
             update tracked_products
-            set marketplace = ?,
+            set owner_chat_id = ?,
+                marketplace = ?,
                 external_id = ?,
                 nm_id = ?,
                 sku = ?,
@@ -262,9 +357,9 @@ def upsert_target(conn: sqlite3.Connection, target: ProductTarget) -> ProductTar
     cursor = conn.execute(
         """
         insert into tracked_products(
-          marketplace, external_id, nm_id, sku, name, search_query,
+          owner_chat_id, marketplace, external_id, nm_id, sku, name, search_query,
           own_supplier_id, own_supplier_name, note, active
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         values,
     )

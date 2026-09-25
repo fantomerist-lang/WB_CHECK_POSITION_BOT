@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import secrets
+from dataclasses import replace
 from pathlib import Path
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 
 from telegram import Update
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .analytics import (
     PositionSeries,
@@ -22,12 +25,17 @@ from .analytics import (
 from .analyzer import analyze_target
 from .config import Config, get_config
 from .db import (
+    active_authorized_users,
     active_targets,
+    authorize_user,
+    claim_unowned_targets,
     connect,
-    get_target_by_external_id,
+    delete_setting,
+    disable_targets_for_owner,
+    get_authorized_user,
     get_target_by_id,
     get_setting,
-    get_target_by_nm_id,
+    revoke_user,
     save_position_check,
     set_target_active,
     set_setting,
@@ -116,16 +124,29 @@ def analyze_target_bounded(
             finish_operation()
 
 
-def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    chat = update.effective_chat
-    if not chat:
-        return False
+def configured_admin_chat_id(context: ContextTypes.DEFAULT_TYPE) -> int | None:
     config: Config = context.application.bot_data["config"]
     if config.admin_chat_id:
-        return chat.id == config.admin_chat_id
+        return config.admin_chat_id
     conn = connect(config.database_path)
     saved = get_setting(conn, "admin_chat_id")
-    return bool(saved and int(saved) == chat.id)
+    return int(saved) if saved else None
+
+
+def is_admin_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    return configured_admin_chat_id(context) == int(chat_id)
+
+
+def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    return bool(chat and is_admin_chat(context, chat.id))
+
+
+def is_authorized_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    if is_admin_chat(context, chat_id):
+        return True
+    conn = connect(db_path(context))
+    return get_authorized_user(conn, chat_id) is not None
 
 
 async def ensure_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -136,36 +157,61 @@ async def ensure_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     return False
 
 
-HELP_TEXT = """Команды бота:
+async def ensure_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    if chat and is_authorized_chat(context, chat.id):
+        return True
+    if update.effective_message:
+        await update.effective_message.reply_text("Нет доступа. Попроси владельца создать приглашение командой /invite.")
+    return False
 
-/start - запустить и привязать бота
-/help - показать все команды
-/status - состояние базы и расписания
 
-/add ID | запрос | Магазин - добавить запрос Wildberries
-/addym ID или ссылка | запрос | Магазин - добавить запрос Яндекс Маркета
-/list - показать активные запросы и их ID
-/disable ID - временно остановить запрос
-/enable ID - снова включить запрос
-/delete ID - удалить запрос из отслеживания, сохранив историю
+HELP_TEXT = """КАК РАБОТАЕТ БОТ
 
-/check ID - вручную проверить один запрос
-/checkall - вручную проверить все активные запросы
+Каждая запись связывает площадку, карточку и поисковый запрос. Ежедневно бот вводит запрос в поиск, находит позицию карточки, сохраняет результат и присылает отчет. Ручные проверки нужны для теста; недельные общие графики строятся по автоматическим проверкам.
 
-/week ID - недельный график одного запроса
-/weekwb - недельный график всех запросов Wildberries
-/weekym - недельный график всех запросов Яндекс Маркета
+ДОБАВЛЕНИЕ
+/add ID | запрос | Магазин — добавить Wildberries
+Пример: /add 399568521 | 1с бухгалтерия базовая | Кодерлайн
 
-/stats - краткая статистика всех запросов
-/stats ID - график одного запроса за всё время
-/statswb - общий график Wildberries за всё время
-/statsym - общий график Яндекс Маркета за всё время
+/addym ID или ссылка | запрос | Магазин — добавить Яндекс Маркет
+Пример: /addym 4717385177 | 1с бухгалтерия базовая | Кодерлайн
 
-ID записи можно узнать командой /list."""
+УПРАВЛЕНИЕ
+/list — активные записи и их ID
+/status — состояние базы и расписания
+/disable ID — приостановить ежедневную проверку
+/enable ID — возобновить проверку
+/delete ID — убрать из отслеживания, сохранив историю
+
+ПРОВЕРКИ
+/check ID — проверить одну запись сейчас
+/checkall — проверить все доступные активные записи
+
+ГРАФИКИ
+/week ID — неделя по одной записи
+/weekwb — неделя по всем доступным запросам WB
+/weekym — неделя по всем доступным запросам Яндекс Маркета
+/stats — краткая статистика
+/stats ID — одна запись за всё время
+/statswb — все запросы WB за всё время
+/statsym — все запросы Яндекс Маркета за всё время
+
+ДОСТУП
+/invite — создать приглашение для второго пользователя (только владелец)
+/users — показать пользователей (только владелец)
+/removeuser CHAT_ID — закрыть доступ (только владелец)
+
+У каждого приглашенного пользователя отдельные запросы. Он не видит записи владельца; владелец видит все записи и получает копии его команд.
+
+/start — запустить бота
+/help — снова показать эту инструкцию
+
+ID записи берется из /list."""
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     if update.effective_message:
         await update.effective_message.reply_text(HELP_TEXT)
@@ -182,7 +228,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if saved or config.admin_chat_id:
         if not is_admin(update, context):
-            await update.effective_message.reply_text("Бот уже привязан к владельцу.")
+            if get_authorized_user(conn, chat.id):
+                await update.effective_message.reply_text(f"Готов. У тебя отдельный набор запросов.\n\n{HELP_TEXT}")
+                return
+            invite_code = get_setting(conn, "member_invite_code") or ""
+            invite_expires = get_setting(conn, "member_invite_expires") or ""
+            supplied_code = args[0] if args else ""
+            try:
+                expires_at = datetime.fromisoformat(invite_expires)
+            except ValueError:
+                expires_at = datetime.min.replace(tzinfo=timezone.utc)
+            invite_valid = (
+                bool(invite_code)
+                and bool(supplied_code)
+                and hmac.compare_digest(invite_code, supplied_code)
+                and expires_at > datetime.now(timezone.utc)
+            )
+            if not invite_valid:
+                await update.effective_message.reply_text(
+                    "Бот уже привязан к владельцу. Для доступа попроси у него одноразовую команду приглашения."
+                )
+                return
+            if active_authorized_users(conn):
+                await update.effective_message.reply_text("Место второго пользователя уже занято.")
+                return
+            user = update.effective_user
+            authorize_user(
+                conn,
+                chat.id,
+                username=user.username if user else "",
+                display_name=user.full_name if user else "",
+            )
+            delete_setting(conn, "member_invite_code")
+            delete_setting(conn, "member_invite_expires")
+            admin_id = configured_admin_chat_id(context)
+            if admin_id:
+                label = user.full_name if user else str(chat.id)
+                await safe_send_message(
+                    context,
+                    admin_id,
+                    f"Подключен второй пользователь: {label} (chat_id {chat.id}).",
+                )
+            await update.effective_message.reply_text(f"Доступ открыт. У тебя отдельный набор запросов.\n\n{HELP_TEXT}")
             return
     elif config.setup_key and config.setup_key != "change-me" and (not args or args[0] != config.setup_key):
         await update.effective_message.reply_text("Для первого запуска напиши /start SETUP_KEY.")
@@ -190,18 +277,132 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         set_setting(conn, "admin_chat_id", str(chat.id))
 
+    claim_unowned_targets(conn, chat.id)
+
     await update.effective_message.reply_text(f"Готов.\n\n{HELP_TEXT}")
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def invite_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await ensure_admin(update, context):
+        return
+    conn = connect(db_path(context))
+    users = active_authorized_users(conn)
+    if users:
+        user = users[0]
+        label = str(user["display_name"] or user["username"] or user["chat_id"])
+        await update.effective_message.reply_text(
+            f"Второй пользователь уже подключен: {label} (chat_id {user['chat_id']}).\n"
+            "Сначала закрой ему доступ командой /removeuser CHAT_ID."
+        )
+        return
+
+    code = secrets.token_urlsafe(6)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    set_setting(conn, "member_invite_code", code)
+    set_setting(conn, "member_invite_expires", expires_at.isoformat())
+    await update.effective_message.reply_text(
+        "Перешли второму пользователю эту команду:\n\n"
+        f"/start {code}\n\n"
+        "Код одноразовый и действует 24 часа."
+    )
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    conn = connect(db_path(context))
+    admin_id = configured_admin_chat_id(context)
+    lines = [f"Владелец: chat_id {admin_id}"]
+    users = active_authorized_users(conn)
+    if not users:
+        lines.append("Второй пользователь: не подключен")
+    for user in users:
+        label = str(user["display_name"] or user["username"] or "без имени")
+        username = f"@{user['username']}" if user["username"] else "без username"
+        lines.append(f"Пользователь: {label}, {username}, chat_id {user['chat_id']}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Формат: /removeuser CHAT_ID. Узнать ID можно через /users.")
+        return
+    try:
+        chat_id = int(args[0])
+    except ValueError:
+        await update.effective_message.reply_text("CHAT_ID должен быть числом.")
+        return
+    conn = connect(db_path(context))
+    if not revoke_user(conn, chat_id):
+        await update.effective_message.reply_text("Активный пользователь с таким CHAT_ID не найден.")
+        return
+    disable_targets_for_owner(conn, chat_id)
+    await update.effective_message.reply_text(
+        f"Доступ пользователя {chat_id} закрыт. Его запросы остановлены, история сохранена."
+    )
+    try:
+        await safe_send_message(context, chat_id, "Владелец закрыл доступ к боту.")
+    except TelegramError:
+        pass
+
+
+async def audit_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or not message or is_admin_chat(context, chat.id):
+        return
+    conn = connect(db_path(context))
+    if not get_authorized_user(conn, chat.id):
+        return
+    user = update.effective_user
+    authorize_user(
+        conn,
+        chat.id,
+        username=user.username if user else "",
+        display_name=user.full_name if user else "",
+    )
+    admin_id = configured_admin_chat_id(context)
+    if not admin_id:
+        return
+    label = user.full_name if user else str(chat.id)
+    username = f" @{user.username}" if user and user.username else ""
+    await safe_send_message(
+        context,
+        admin_id,
+        f"Команда пользователя {label}{username} (chat_id {chat.id}):\n{message.text or ''}",
+    )
+
+
+def visible_targets_for_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    chat_id: int,
+    include_inactive: bool = False,
+) -> list[ProductTarget]:
+    owner_chat_id = None if is_admin_chat(context, chat_id) else chat_id
+    return active_targets(conn, include_inactive=include_inactive, owner_chat_id=owner_chat_id)
+
+
+def can_access_target(context: ContextTypes.DEFAULT_TYPE, chat_id: int, target: ProductTarget) -> bool:
+    return is_admin_chat(context, chat_id) or target.owner_chat_id == int(chat_id)
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_access(update, context):
         return
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
-    targets = active_targets(conn, include_inactive=True)
+    chat_id = update.effective_chat.id
+    targets = visible_targets_for_chat(context, conn, chat_id, include_inactive=True)
     active_count = len([target for target in targets if target.active])
     wb_count = len([target for target in targets if target.marketplace == "wb"])
     ym_count = len([target for target in targets if target.marketplace == "ym"])
+    users_line = ""
+    if is_admin_chat(context, chat_id):
+        users_line = f"\nДопущенных пользователей: {1 + len(active_authorized_users(conn))}"
     await update.effective_message.reply_text(
         f"Карточек в базе: {len(targets)}\n"
         f"Wildberries: {wb_count}\n"
@@ -209,17 +410,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Активных: {active_count}\n"
         f"Автоотчеты: {', '.join(config.report_times)} каждые {config.report_interval_days} дн.\n"
         f"Страниц: WB {config.wb_max_search_pages}, Яндекс {config.ym_max_search_pages}"
+        f"{users_line}"
     )
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     try:
         target = parse_add_args(update.effective_message.text or "", marketplace="wb")
     except (TypeError, ValueError) as error:
         await update.effective_message.reply_text(str(error))
         return
+    target = replace(target, owner_chat_id=update.effective_chat.id)
     conn = connect(db_path(context))
     saved = upsert_target(conn, target)
     await update.effective_message.reply_text(
@@ -228,13 +431,14 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def add_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     try:
         target = parse_add_args(update.effective_message.text or "", marketplace="ym")
     except (TypeError, ValueError) as error:
         await update.effective_message.reply_text(str(error))
         return
+    target = replace(target, owner_chat_id=update.effective_chat.id)
     conn = connect(db_path(context))
     saved = upsert_target(conn, target)
     await update.effective_message.reply_text(
@@ -243,32 +447,47 @@ async def add_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def list_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     conn = connect(db_path(context))
-    targets = active_targets(conn)
+    chat_id = update.effective_chat.id
+    targets = visible_targets_for_chat(context, conn, chat_id)
     if not targets:
         await update.effective_message.reply_text("Активных карточек пока нет.")
         return
-    lines = [
-        f"{target.id}: [{target.marketplace_label()}] {target.product_id() or '-'} | {target.search_query}"
-        for target in targets[:50]
-    ]
+    admin_id = configured_admin_chat_id(context)
+    lines = []
+    for target in targets[:50]:
+        owner = ""
+        if is_admin_chat(context, chat_id) and target.owner_chat_id not in {0, admin_id}:
+            owner = f" | пользователь {target.owner_chat_id}"
+        lines.append(
+            f"{target.id}: [{target.marketplace_label()}] {target.product_id() or '-'} | "
+            f"{target.search_query}{owner}"
+        )
     if len(targets) > 50:
         lines.append(f"...и еще {len(targets) - 50}")
     await update.effective_message.reply_text("\n".join(lines))
 
 
-def target_by_number(conn, value: int) -> ProductTarget | None:
-    return (
-        get_target_by_id(conn, value)
-        or get_target_by_nm_id(conn, value)
-        or get_target_by_external_id(conn, "ym", str(value))
-    )
+def target_by_number(
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    chat_id: int,
+    value: int,
+) -> ProductTarget | None:
+    targets = visible_targets_for_chat(context, conn, chat_id, include_inactive=True)
+    for target in targets:
+        if target.id == value:
+            return target
+    for target in targets:
+        if target.nm_id == value or target.external_id == str(value):
+            return target
+    return None
 
 
 async def set_active_command(update: Update, context: ContextTypes.DEFAULT_TYPE, active: bool) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     args = context.args or []
     command = "enable" if active else "disable"
@@ -282,7 +501,7 @@ async def set_active_command(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     conn = connect(db_path(context))
-    target = target_by_number(conn, value)
+    target = target_by_number(context, conn, update.effective_chat.id, value)
     if not target or not target.id:
         await update.effective_message.reply_text("Карточка не найдена в базе.")
         return
@@ -301,7 +520,7 @@ async def enable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def delete_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     args = context.args or []
     if not args:
@@ -315,7 +534,7 @@ async def delete_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     conn = connect(db_path(context))
     target = get_target_by_id(conn, target_id)
-    if not target:
+    if not target or not can_access_target(context, update.effective_chat.id, target):
         await update.effective_message.reply_text("Запрос с таким id не найден в базе.")
         return
     if not target.active:
@@ -332,7 +551,7 @@ async def delete_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     args = context.args or []
     if not args:
@@ -344,7 +563,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("ID должен быть числом.")
         return
     conn = connect(db_path(context))
-    target = target_by_number(conn, value)
+    target = target_by_number(context, conn, update.effective_chat.id, value)
     if not target:
         await update.effective_message.reply_text("Карточка не найдена в базе.")
         return
@@ -379,7 +598,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def checkall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     await run_checks_for_chat(context, update.effective_chat.id)
 
@@ -436,7 +655,7 @@ async def send_marketplace_overview(
 ) -> bool:
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
-    targets = active_targets(conn, include_inactive=True)
+    targets = visible_targets_for_chat(context, conn, chat_id, include_inactive=True)
     marketplace_targets = [target for target in targets if target.marketplace == marketplace]
     marketplace_label = "Яндекс Маркет" if marketplace == "ym" else "Wildberries"
     if not marketplace_targets:
@@ -510,7 +729,7 @@ async def target_from_first_arg(update: Update, context: ContextTypes.DEFAULT_TY
         await update.effective_message.reply_text("ID должен быть числом.")
         return None
     conn = connect(db_path(context))
-    target = target_by_number(conn, value)
+    target = target_by_number(context, conn, update.effective_chat.id, value)
     if not target:
         await update.effective_message.reply_text("Карточка не найдена в базе.")
         return None
@@ -518,7 +737,7 @@ async def target_from_first_arg(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     target = await target_from_first_arg(update, context, "week")
     if not target:
@@ -556,25 +775,30 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def week_wb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     await send_marketplace_overview(context, update.effective_chat.id, "wb")
 
 
 async def week_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     await send_marketplace_overview(context, update.effective_chat.id, "ym")
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
 
     if not context.args:
-        targets = active_targets(conn, include_inactive=True)
+        targets = visible_targets_for_chat(
+            context,
+            conn,
+            update.effective_chat.id,
+            include_inactive=True,
+        )
         await safe_send_message(context, update.effective_chat.id, format_all_targets_summary(conn, targets, config.timezone))
         return
 
@@ -604,13 +828,13 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def stats_wb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     await send_marketplace_overview(context, update.effective_chat.id, "wb", all_time=True)
 
 
 async def stats_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_admin(update, context):
+    if not await ensure_access(update, context):
         return
     await send_marketplace_overview(context, update.effective_chat.id, "ym", all_time=True)
 
@@ -658,9 +882,7 @@ async def run_checks_for_chat_unlocked(
 ) -> None:
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
-    if auto and not should_run_auto_report(conn, config):
-        return
-    targets = active_targets(conn)
+    targets = visible_targets_for_chat(context, conn, chat_id)
     if not targets:
         await context.bot.send_message(chat_id=chat_id, text="Нет активных карточек для проверки.")
         return
@@ -755,11 +977,81 @@ async def safe_send_photo(
 async def scheduled_report(context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
-    chat_id = config.admin_chat_id or get_setting(conn, "admin_chat_id")
-    if not chat_id:
+    admin_id = configured_admin_chat_id(context)
+    if not admin_id:
         log.info("No admin chat id yet; scheduled report skipped")
         return
-    await run_checks_for_chat(context, int(chat_id), auto=True)
+    if not should_run_auto_report(conn, config):
+        return
+
+    lock = check_lock(context)
+    if lock.locked():
+        log.warning("Scheduled report skipped because another marketplace check is running")
+        return
+
+    async with lock:
+        targets = active_targets(conn)
+        if not targets:
+            await safe_send_message(context, admin_id, "Нет активных карточек для автоматической проверки.")
+            return
+
+        clients = {"wb": wb_client(context), "ym": ym_client(context)}
+        analyses_by_owner: dict[int, list] = {}
+        for target in targets:
+            owner_id = target.owner_chat_id or admin_id
+            try:
+                analysis = await asyncio.to_thread(
+                    analyze_target_bounded,
+                    target,
+                    clients[target.marketplace],
+                    max_pages_for_target(config, target),
+                    config.ym_check_timeout if target.marketplace == "ym" else 0,
+                )
+            except (WildberriesError, YandexMarketError) as error:
+                text = f"Ошибка {target.marketplace_label()} для {target.search_query}: {error}"
+                await safe_send_message(context, admin_id, text)
+                if owner_id != admin_id:
+                    await safe_send_message(context, owner_id, text)
+                continue
+            except Exception:
+                log.exception("Unexpected scheduled check error for target id=%s", target.id)
+                text = (
+                    f"Ошибка {target.marketplace_label()} для {target.search_query}: "
+                    "проверка аварийно остановлена."
+                )
+                await safe_send_message(context, admin_id, text)
+                if owner_id != admin_id:
+                    await safe_send_message(context, owner_id, text)
+                continue
+            save_position_check(conn, analysis, check_source="auto")
+            analyses_by_owner.setdefault(owner_id, []).append(analysis)
+
+        owner_analyses = analyses_by_owner.get(admin_id, [])
+        if owner_analyses:
+            for message in format_full_report_messages(owner_analyses):
+                await safe_send_message(context, admin_id, message, disable_web_page_preview=True)
+
+        for user in active_authorized_users(conn):
+            member_id = int(user["chat_id"])
+            member_analyses = analyses_by_owner.get(member_id, [])
+            if member_analyses:
+                label = str(user["display_name"] or user["username"] or member_id)
+                await safe_send_message(
+                    context,
+                    admin_id,
+                    f"Автоотчет пользователя {label} (chat_id {member_id}):",
+                )
+            for message in format_full_report_messages(member_analyses):
+                await safe_send_message(context, admin_id, message, disable_web_page_preview=True)
+                await safe_send_message(context, member_id, message, disable_web_page_preview=True)
+
+        await send_marketplace_overview(context, admin_id, "wb", notify_if_empty=False)
+        await send_marketplace_overview(context, admin_id, "ym", notify_if_empty=False)
+        for user in active_authorized_users(conn):
+            member_id = int(user["chat_id"])
+            if analyses_by_owner.get(member_id):
+                await send_marketplace_overview(context, member_id, "wb", notify_if_empty=False)
+                await send_marketplace_overview(context, member_id, "ym", notify_if_empty=False)
 
 
 def schedule_reports(app: Application, config: Config) -> None:
@@ -776,10 +1068,18 @@ def main() -> None:
     config = get_config(require_telegram=True)
     app = Application.builder().token(config.telegram_token).build()
     app.bot_data["config"] = config
-    connect(config.database_path).close()
+    conn = connect(config.database_path)
+    admin_id = config.admin_chat_id or get_setting(conn, "admin_chat_id")
+    if admin_id:
+        claim_unowned_targets(conn, int(admin_id))
+    conn.close()
 
+    app.add_handler(MessageHandler(filters.COMMAND, audit_member_command), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("invite", invite_user))
+    app.add_handler(CommandHandler("users", users_command))
+    app.add_handler(CommandHandler("removeuser", remove_user))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("addym", add_yandex))
