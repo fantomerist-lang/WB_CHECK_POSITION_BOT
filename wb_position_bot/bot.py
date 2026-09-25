@@ -62,6 +62,9 @@ def wb_client(context: ContextTypes.DEFAULT_TYPE) -> WildberriesClient:
         proxy_url=config.wb_proxy_url,
         proxy_auth_token=config.wb_proxy_auth_token,
         proxy_insecure_ssl=config.wb_proxy_insecure_ssl,
+        reef_api_key=config.reef_api_key,
+        reef_api_url=config.reef_api_url,
+        reef_country=config.reef_country,
     )
 
 
@@ -69,7 +72,7 @@ def ym_client(context: ContextTypes.DEFAULT_TYPE) -> YandexMarketClient:
     config: Config = context.application.bot_data["config"]
     return YandexMarketClient(
         region_id=config.ym_region_id,
-        timeout=config.request_timeout,
+        timeout=config.ym_request_timeout,
         request_delay_seconds=config.ym_request_delay_seconds,
         request_delay_jitter_seconds=config.ym_request_delay_jitter_seconds,
         retries=config.ym_request_retries,
@@ -86,6 +89,31 @@ def client_for_target(context: ContextTypes.DEFAULT_TYPE, target: ProductTarget)
 
 def max_pages_for_target(config: Config, target: ProductTarget) -> int:
     return config.ym_max_search_pages if target.marketplace == "ym" else config.wb_max_search_pages
+
+
+def check_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    lock = context.application.bot_data.get("marketplace_check_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        context.application.bot_data["marketplace_check_lock"] = lock
+    return lock
+
+
+def analyze_target_bounded(
+    target: ProductTarget,
+    client,
+    max_pages: int,
+    timeout_seconds: float,
+):
+    start_operation = getattr(client, "start_operation", None)
+    finish_operation = getattr(client, "finish_operation", None)
+    if start_operation:
+        start_operation(timeout_seconds)
+    try:
+        return analyze_target(target, client, max_pages)
+    finally:
+        if finish_operation:
+            finish_operation()
 
 
 def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -320,20 +348,34 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not target:
         await update.effective_message.reply_text("Карточка не найдена в базе.")
         return
-    await update.effective_message.reply_text(f"Проверяю выдачу {target.marketplace_label()}...")
-    config: Config = context.application.bot_data["config"]
-    try:
-        analysis = await asyncio.to_thread(
-            analyze_target,
-            target,
-            client_for_target(context, target),
-            max_pages_for_target(config, target),
+    lock = check_lock(context)
+    if lock.locked():
+        await update.effective_message.reply_text(
+            "Другая проверка уже выполняется. Дождись её результата и повтори команду."
         )
-    except (WildberriesError, YandexMarketError) as error:
-        await update.effective_message.reply_text(f"Ошибка {target.marketplace_label()}: {error}")
         return
-    save_position_check(conn, analysis, check_source="manual")
-    await update.effective_message.reply_text(format_analysis(analysis), disable_web_page_preview=True)
+    config: Config = context.application.bot_data["config"]
+    async with lock:
+        await update.effective_message.reply_text(f"Проверяю выдачу {target.marketplace_label()}...")
+        try:
+            analysis = await asyncio.to_thread(
+                analyze_target_bounded,
+                target,
+                client_for_target(context, target),
+                max_pages_for_target(config, target),
+                config.ym_check_timeout if target.marketplace == "ym" else 0,
+            )
+        except (WildberriesError, YandexMarketError) as error:
+            await update.effective_message.reply_text(f"Ошибка {target.marketplace_label()}: {error}")
+            return
+        except Exception:
+            log.exception("Unexpected marketplace check error for target id=%s", target.id)
+            await update.effective_message.reply_text(
+                f"Ошибка {target.marketplace_label()}: проверка аварийно остановлена. Попробуй ещё раз позже."
+            )
+            return
+        save_position_check(conn, analysis, check_source="manual")
+        await update.effective_message.reply_text(format_analysis(analysis), disable_web_page_preview=True)
 
 
 async def checkall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -593,6 +635,27 @@ def should_run_auto_report(conn, config: Config) -> bool:
 
 
 async def run_checks_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, auto: bool = False) -> None:
+    lock = check_lock(context)
+    if lock.locked():
+        if not auto:
+            await safe_send_message(
+                context,
+                chat_id,
+                "Другая проверка уже выполняется. Дождись её результата и повтори команду.",
+            )
+        else:
+            log.warning("Scheduled report skipped because another marketplace check is running")
+        return
+
+    async with lock:
+        await run_checks_for_chat_unlocked(context, chat_id, auto=auto)
+
+
+async def run_checks_for_chat_unlocked(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    auto: bool = False,
+) -> None:
     config: Config = context.application.bot_data["config"]
     conn = connect(config.database_path)
     if auto and not should_run_auto_report(conn, config):
@@ -610,15 +673,24 @@ async def run_checks_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     for target in targets:
         try:
             analysis = await asyncio.to_thread(
-                analyze_target,
+                analyze_target_bounded,
                 target,
                 clients[target.marketplace],
                 max_pages_for_target(config, target),
+                config.ym_check_timeout if target.marketplace == "ym" else 0,
             )
         except (WildberriesError, YandexMarketError) as error:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"Ошибка {target.marketplace_label()} для {target.search_query}: {error}",
+            )
+            continue
+        except Exception:
+            log.exception("Unexpected marketplace check error for target id=%s", target.id)
+            await safe_send_message(
+                context,
+                chat_id,
+                f"Ошибка {target.marketplace_label()} для {target.search_query}: проверка аварийно остановлена.",
             )
             continue
         save_position_check(conn, analysis, check_source="auto" if auto else "manual")

@@ -68,6 +68,8 @@ def analyze_target(
         products = client.search(query, page=page)
         pages_checked = page
         if not products:
+            if page > 1:
+                pages_checked = page - 1
             break
 
         for product in products:

@@ -58,6 +58,14 @@ class YandexMarketClient:
         )
         self._last_request_at = 0.0
         self._seller_cache: dict[int, str] = {}
+        self._operation_deadline: float | None = None
+
+    def start_operation(self, timeout_seconds: float) -> None:
+        timeout = max(float(timeout_seconds or 0), 0.01)
+        self._operation_deadline = time.monotonic() + timeout
+
+    def finish_operation(self) -> None:
+        self._operation_deadline = None
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
         params = {
@@ -76,6 +84,7 @@ class YandexMarketClient:
     def _enrich_top_sellers(self, items: list[SearchResultItem], limit: int) -> list[SearchResultItem]:
         enriched = list(items)
         for index, item in enumerate(enriched[:limit]):
+            self._remaining_time()
             if item.supplier_name or not item.supplier_id:
                 continue
             cached = self._seller_cache.get(item.supplier_id)
@@ -98,6 +107,7 @@ class YandexMarketClient:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             self._wait_for_slot()
+            remaining = self._remaining_time()
             request = urllib.request.Request(
                 url,
                 headers={
@@ -109,7 +119,8 @@ class YandexMarketClient:
                 },
             )
             try:
-                with self.opener.open(request, timeout=self.timeout) as response:
+                request_timeout = min(self.timeout, remaining) if remaining is not None else self.timeout
+                with self.opener.open(request, timeout=max(request_timeout, 0.5)) as response:
                     raw = response.read().decode("utf-8", errors="replace")
                 if is_blocked_page(raw):
                     raise YandexMarketError("Яндекс Маркет повернув сторінку перевірки або CAPTCHA")
@@ -117,13 +128,13 @@ class YandexMarketClient:
             except urllib.error.HTTPError as error:
                 last_error = error
                 if error.code in {403, 429, 500, 502, 503, 504} and attempt < self.retries:
-                    time.sleep(min(3.0 * attempt, 15.0))
+                    self._sleep(min(3.0 * attempt, 15.0))
                     continue
                 raise YandexMarketError(f"HTTP {error.code}") from error
             except TRANSIENT_NETWORK_ERRORS as error:
                 last_error = error
                 if attempt < self.retries:
-                    time.sleep(min(2.5 * attempt, 10.0))
+                    self._sleep(min(2.5 * attempt, 10.0))
                     continue
                 raise YandexMarketError(f"помилка мережі: {error}") from error
             except YandexMarketError:
@@ -137,8 +148,26 @@ class YandexMarketClient:
         now = time.monotonic()
         wait_for = delay - (now - self._last_request_at)
         if wait_for > 0:
-            time.sleep(wait_for)
+            self._sleep(wait_for)
         self._last_request_at = time.monotonic()
+
+    def _remaining_time(self) -> float | None:
+        if self._operation_deadline is None:
+            return None
+        remaining = self._operation_deadline - time.monotonic()
+        if remaining <= 0:
+            raise YandexMarketError("проверка превысила допустимое время и была остановлена")
+        return remaining
+
+    def _sleep(self, seconds: float) -> None:
+        remaining = self._remaining_time()
+        if remaining is None:
+            time.sleep(seconds)
+            return
+        if seconds >= remaining:
+            time.sleep(remaining)
+            raise YandexMarketError("проверка превысила допустимое время и была остановлена")
+        time.sleep(seconds)
 
 
 def parse_yandex_search_html(raw: str) -> list[SearchResultItem]:

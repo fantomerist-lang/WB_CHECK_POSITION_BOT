@@ -38,11 +38,16 @@ class Config:
     wb_proxy_url: str
     wb_proxy_auth_token: str
     wb_proxy_insecure_ssl: bool
+    reef_api_key: str
+    reef_api_url: str
+    reef_country: str
     ym_region_id: int
     ym_max_search_pages: int
     ym_request_delay_seconds: float
     ym_request_delay_jitter_seconds: float
     ym_request_retries: int
+    ym_request_timeout: float
+    ym_check_timeout: float
     ym_proxy_url: str
     ym_proxy_auth_token: str
     ym_proxy_insecure_ssl: bool
@@ -110,6 +115,10 @@ def get_config(require_telegram: bool = True) -> Config:
     wb_proxy_url = os.getenv("WB_PROXY_URL", "").strip()
     wb_proxy_auth_token = os.getenv("WB_PROXY_AUTH_TOKEN", "").strip()
     wb_proxy_insecure_ssl = _bool_env("WB_PROXY_INSECURE_SSL", False)
+    reef_api_key = os.getenv("REEF_API_KEY", "").strip()
+    wb_max_search_pages = _int_env("WB_MAX_SEARCH_PAGES", 3 if reef_api_key else 20, minimum=1)
+    if reef_api_key:
+        wb_max_search_pages = min(wb_max_search_pages, 3)
 
     return Config(
         telegram_token=token,
@@ -122,7 +131,7 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_dest=os.getenv("WB_DEST", "-1257786").strip(),
         wb_currency=os.getenv("WB_CURRENCY", "rub").strip(),
         wb_locale=os.getenv("WB_LOCALE", "ru").strip(),
-        wb_max_search_pages=_int_env("WB_MAX_SEARCH_PAGES", 20, minimum=1),
+        wb_max_search_pages=wb_max_search_pages,
         wb_request_delay_seconds=_float_env("WB_REQUEST_DELAY_SECONDS", 2.0),
         wb_request_delay_jitter_seconds=_float_env("WB_REQUEST_DELAY_JITTER_SECONDS", 3.0),
         wb_request_retries=_int_env("WB_REQUEST_RETRIES", 4, minimum=1),
@@ -130,14 +139,22 @@ def get_config(require_telegram: bool = True) -> Config:
         wb_proxy_url=wb_proxy_url,
         wb_proxy_auth_token=wb_proxy_auth_token,
         wb_proxy_insecure_ssl=wb_proxy_insecure_ssl,
+        reef_api_key=reef_api_key,
+        reef_api_url=os.getenv(
+            "REEF_API_URL",
+            "https://api.reefapi.com/wildberries/v1/search",
+        ).strip(),
+        reef_country=os.getenv("REEF_COUNTRY", "ru").strip() or "ru",
         ym_region_id=_int_env("YM_REGION_ID", 213, minimum=1),
         ym_max_search_pages=_int_env("YM_MAX_SEARCH_PAGES", 20, minimum=1),
         ym_request_delay_seconds=_float_env("YM_REQUEST_DELAY_SECONDS", 2.0),
         ym_request_delay_jitter_seconds=_float_env("YM_REQUEST_DELAY_JITTER_SECONDS", 3.0),
-        ym_request_retries=_int_env("YM_REQUEST_RETRIES", 4, minimum=1),
-        ym_proxy_url=os.getenv("YM_PROXY_URL", "").strip() or wb_proxy_url,
-        ym_proxy_auth_token=os.getenv("YM_PROXY_AUTH_TOKEN", "").strip() or wb_proxy_auth_token,
-        ym_proxy_insecure_ssl=_bool_env("YM_PROXY_INSECURE_SSL", wb_proxy_insecure_ssl),
-        ym_enrich_sellers=_bool_env("YM_ENRICH_SELLERS", True),
+        ym_request_retries=_int_env("YM_REQUEST_RETRIES", 2, minimum=1),
+        ym_request_timeout=_float_env("YM_REQUEST_TIMEOUT", 20.0),
+        ym_check_timeout=_float_env("YM_CHECK_TIMEOUT_SECONDS", 120.0),
+        ym_proxy_url=os.getenv("YM_PROXY_URL", "").strip(),
+        ym_proxy_auth_token=os.getenv("YM_PROXY_AUTH_TOKEN", "").strip(),
+        ym_proxy_insecure_ssl=_bool_env("YM_PROXY_INSECURE_SSL", False),
+        ym_enrich_sellers=_bool_env("YM_ENRICH_SELLERS", False),
         request_timeout=_float_env("REQUEST_TIMEOUT", 60.0),
     )

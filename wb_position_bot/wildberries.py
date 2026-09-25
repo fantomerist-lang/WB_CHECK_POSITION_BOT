@@ -42,6 +42,9 @@ SEARCH_ENDPOINTS = (
     "https://search.wb.ru/exactmatch/ru/common/v4/search",
 )
 
+REEF_SEARCH_ENDPOINT = "https://api.reefapi.com/wildberries/v1/search"
+REEF_MAX_SEARCH_PAGES = 3
+
 
 USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
@@ -60,6 +63,7 @@ TRANSIENT_NETWORK_ERRORS = (
     http.client.BadStatusLine,
     http.client.IncompleteRead,
 )
+REEF_TRANSIENT_ERRORS = (json.JSONDecodeError,) + TRANSIENT_NETWORK_ERRORS
 
 
 class WildberriesClient:
@@ -76,6 +80,9 @@ class WildberriesClient:
         proxy_url: str = "",
         proxy_auth_token: str = "",
         proxy_insecure_ssl: bool = False,
+        reef_api_key: str = "",
+        reef_api_url: str = REEF_SEARCH_ENDPOINT,
+        reef_country: str = "ru",
     ) -> None:
         self.dest = dest
         self.currency = currency
@@ -86,12 +93,19 @@ class WildberriesClient:
         self.retries = max(int(retries or 1), 1)
         self.rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds or 0), 0.0)
         self.proxy_url = str(proxy_url or "")
+        self.reef_api_key = str(reef_api_key or "").strip()
+        self.reef_api_url = str(reef_api_url or REEF_SEARCH_ENDPOINT).strip()
+        self.reef_country = str(reef_country or "ru").strip() or "ru"
         self._last_request_at = 0.0
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = build_opener(proxy_url, self.cookie_jar, proxy_insecure_ssl, proxy_auth_token)
+        self.reef_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._reef_total_pages: dict[str, int] = {}
         self._warmed_up = False
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
+        if self.reef_api_key:
+            return self._search_reef(query, page)
         self._warm_up()
         params = {
             "ab_testing": "false",
@@ -125,6 +139,86 @@ class WildberriesClient:
         if saw_empty_response:
             return []
         raise WildberriesError(f"не удалось получить выдачу WB: {last_error}")
+
+    def _search_reef(self, query: str, page: int) -> list[SearchResultItem]:
+        page = max(int(page or 1), 1)
+        query_key = " ".join(str(query or "").casefold().split())
+        known_total_pages = self._reef_total_pages.get(query_key, REEF_MAX_SEARCH_PAGES)
+        if page > min(known_total_pages, REEF_MAX_SEARCH_PAGES):
+            return []
+
+        payload = self._post_reef_json(
+            {
+                "query": query,
+                "country": self.reef_country,
+                "page": page,
+                "sort": "popular",
+            }
+        )
+        if payload.get("ok") is not True:
+            error = payload.get("error") or "неизвестная ошибка ReefAPI"
+            raise WildberriesError(f"ReefAPI не получил выдачу WB: {response_preview(error)}")
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise WildberriesError("ReefAPI вернул ответ без данных Wildberries")
+        total_pages = parse_int(data.get("total_pages"))
+        if total_pages is None:
+            pagination = payload.get("meta", {}).get("pagination", {}) if isinstance(payload.get("meta"), dict) else {}
+            total_pages = parse_int(pagination.get("total_pages")) if isinstance(pagination, dict) else None
+        if total_pages is not None:
+            self._reef_total_pages[query_key] = max(min(total_pages, REEF_MAX_SEARCH_PAGES), 1)
+
+        results = data.get("results")
+        if not isinstance(results, list):
+            return []
+        return parse_reef_search_items(results)
+
+    def _post_reef_json(self, body: dict[str, Any]) -> dict[str, Any]:
+        raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        last_error: Exception | None = None
+        for attempt in range(1, self.retries + 1):
+            self._wait_for_slot()
+            request = urllib.request.Request(
+                self.reef_api_url,
+                data=raw_body,
+                method="POST",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "wb-position-bot/1.0",
+                    "x-api-key": self.reef_api_key,
+                },
+            )
+            try:
+                with self.reef_opener.open(request, timeout=self.timeout) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                value = json.loads(raw)
+                if not isinstance(value, dict):
+                    raise WildberriesError("ReefAPI вернул некорректный JSON")
+                return value
+            except urllib.error.HTTPError as error:
+                last_error = error
+                error_body = error.read().decode("utf-8", errors="replace")
+                if error.code in {429, 500, 502, 503, 504} and attempt < self.retries:
+                    time.sleep(min(2.0 * attempt, 8.0))
+                    continue
+                if error.code == 401:
+                    raise WildberriesError("ReefAPI отклонил REEF_API_KEY") from error
+                if error.code in {402, 403}:
+                    raise WildberriesError(
+                        f"ReefAPI не разрешил запрос (HTTP {error.code}): {response_preview(error_body)}"
+                    ) from error
+                raise WildberriesError(
+                    f"ReefAPI HTTP {error.code}: {response_preview(error_body)}"
+                ) from error
+            except REEF_TRANSIENT_ERRORS as error:
+                last_error = error
+                if attempt < self.retries:
+                    time.sleep(min(2.5 * attempt, 10.0))
+                    continue
+                raise WildberriesError(f"ошибка соединения с ReefAPI: {error}") from error
+        raise WildberriesError(f"ReefAPI не ответил: {last_error}")
 
     def _get_json(self, endpoint: str, params: dict[str, str]) -> dict[str, Any]:
         url = endpoint + "?" + urllib.parse.urlencode(params)
@@ -500,6 +594,36 @@ def parse_search_items(products: list[Any]) -> list[SearchResultItem]:
             parsed.append(parse_search_item(item))
         except WildberriesError:
             continue
+    return parsed
+
+
+def parse_reef_search_items(products: list[Any]) -> list[SearchResultItem]:
+    parsed: list[SearchResultItem] = []
+    for item in products:
+        if not isinstance(item, dict):
+            continue
+        nm_id = parse_int(item.get("product_id"))
+        if not nm_id:
+            continue
+        seller = item.get("seller") if isinstance(item.get("seller"), dict) else {}
+        current_price = parse_float(item.get("price"))
+        original_price = parse_float(item.get("was_price"))
+        parsed.append(
+            SearchResultItem(
+                rank=parse_int(item.get("position")) or 0,
+                nm_id=nm_id,
+                external_id=str(nm_id),
+                name=str(item.get("title") or ""),
+                brand=str(item.get("brand") or ""),
+                supplier_id=parse_int(seller.get("id")),
+                supplier_name=str(seller.get("name") or ""),
+                price=original_price or current_price,
+                sale_price=current_price,
+                rating=parse_float(item.get("rating")),
+                feedbacks=parse_int(item.get("review_count")),
+                url=str(item.get("url") or f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx"),
+            )
+        )
     return parsed
 
 
