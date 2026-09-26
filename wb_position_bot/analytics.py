@@ -335,6 +335,7 @@ def render_week_position_chart(
         ink,
         font_small,
         font_note,
+        position_limit=target.marketplace == "ym",
     )
     _draw_pill(draw, (54, 160), "точка = позиция", point_color, font_small)
     _draw_pill(draw, (274, 160), "крестик = не найдена", red, font_small)
@@ -572,9 +573,16 @@ def render_marketplace_overview_chart(
         if last_labels:
             _draw_resolved_last_labels(draw, last_labels, point_font, chart_top, bottom)
 
+    limit_text = (
+        f"Цвет = поисковый запрос. Крестик = карточка не найдена среди первых "
+        f"{max_search_pages} позиций."
+        if marketplace == "ym"
+        else f"Цвет = поисковый запрос. Крестик = карточка не найдена на первых "
+        f"{max_search_pages} страницах."
+    )
     draw.text(
         (left, height - 30),
-        f"Цвет = поисковый запрос. Крестик = карточка не найдена на первых {max_search_pages} страницах.",
+        limit_text,
         fill=muted,
         font=tiny_font,
     )
@@ -712,20 +720,25 @@ def _draw_explanation_note(
     ink: str,
     font_title: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     font_body: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    position_limit: bool = False,
 ) -> None:
     draw.rounded_rectangle(box, radius=12, fill="#fff8f1", outline=border, width=2)
     center_x = (box[0] + box[2]) / 2
     draw.text((center_x, box[1] + 18), "Не найдена", fill=red, font=font_title, anchor="mm")
     draw.text(
         (center_x, box[1] + 45),
-        "Карточка не найдена на первых",
+        "Карточка не найдена среди первых" if position_limit else "Карточка не найдена на первых",
         fill=ink,
         font=font_body,
         anchor="mm",
     )
     draw.text(
         (center_x, box[1] + 65),
-        f"{max_search_pages} страницах {marketplace_name}",
+        (
+            f"{max_search_pages} позиций {marketplace_name}"
+            if position_limit
+            else f"{max_search_pages} страницах {marketplace_name}"
+        ),
         fill=ink,
         font=font_body,
         anchor="mm",

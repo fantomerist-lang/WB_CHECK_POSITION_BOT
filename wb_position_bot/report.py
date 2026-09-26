@@ -20,6 +20,8 @@ def item_line(item: SearchResultItem) -> str:
 
 def position_text(analysis: PositionAnalysis) -> str:
     if analysis.own_position is None:
+        if analysis.search_scope:
+            return f"не найдена {analysis.search_scope}"
         return f"не найдена за {analysis.pages_checked} стр."
     if analysis.own_position <= 5:
         return f"#{analysis.own_position} в топ-5"

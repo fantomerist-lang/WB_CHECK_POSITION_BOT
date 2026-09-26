@@ -41,8 +41,13 @@ class Config:
     reef_api_key: str
     reef_api_url: str
     reef_country: str
+    apify_api_token: str
     ym_region_id: int
     ym_max_search_pages: int
+    ym_apify_api_url: str
+    ym_apify_max_items: int
+    ym_apify_timeout: float
+    ym_apify_enrich_products: bool
     ym_request_delay_seconds: float
     ym_request_delay_jitter_seconds: float
     ym_request_retries: int
@@ -119,6 +124,10 @@ def get_config(require_telegram: bool = True) -> Config:
     wb_max_search_pages = _int_env("WB_MAX_SEARCH_PAGES", 3 if reef_api_key else 20, minimum=1)
     if reef_api_key:
         wb_max_search_pages = min(wb_max_search_pages, 3)
+    apify_api_token = os.getenv("APIFY_API_TOKEN", "").strip()
+    ym_max_search_pages = _int_env("YM_MAX_SEARCH_PAGES", 20, minimum=1)
+    if apify_api_token:
+        ym_max_search_pages = 1
 
     return Config(
         telegram_token=token,
@@ -145,13 +154,25 @@ def get_config(require_telegram: bool = True) -> Config:
             "https://api.reefapi.com/wildberries/v1/search",
         ).strip(),
         reef_country=os.getenv("REEF_COUNTRY", "ru").strip() or "ru",
+        apify_api_token=apify_api_token,
         ym_region_id=_int_env("YM_REGION_ID", 213, minimum=1),
-        ym_max_search_pages=_int_env("YM_MAX_SEARCH_PAGES", 20, minimum=1),
+        ym_max_search_pages=ym_max_search_pages,
+        ym_apify_api_url=os.getenv(
+            "YM_APIFY_API_URL",
+            "https://api.apify.com/v2/actors/zen-studio~yandex-market-scraper-parser/"
+            "run-sync-get-dataset-items",
+        ).strip(),
+        ym_apify_max_items=_int_env("YM_APIFY_MAX_ITEMS", 50, minimum=1),
+        ym_apify_timeout=_float_env("YM_APIFY_TIMEOUT_SECONDS", 240.0),
+        ym_apify_enrich_products=_bool_env("YM_APIFY_ENRICH_PRODUCTS", True),
         ym_request_delay_seconds=_float_env("YM_REQUEST_DELAY_SECONDS", 2.0),
         ym_request_delay_jitter_seconds=_float_env("YM_REQUEST_DELAY_JITTER_SECONDS", 3.0),
         ym_request_retries=_int_env("YM_REQUEST_RETRIES", 2, minimum=1),
         ym_request_timeout=_float_env("YM_REQUEST_TIMEOUT", 20.0),
-        ym_check_timeout=_float_env("YM_CHECK_TIMEOUT_SECONDS", 120.0),
+        ym_check_timeout=_float_env(
+            "YM_CHECK_TIMEOUT_SECONDS",
+            300.0 if apify_api_token else 120.0,
+        ),
         ym_proxy_url=os.getenv("YM_PROXY_URL", "").strip(),
         ym_proxy_auth_token=os.getenv("YM_PROXY_AUTH_TOKEN", "").strip(),
         ym_proxy_insecure_ssl=_bool_env("YM_PROXY_INSECURE_SSL", False),

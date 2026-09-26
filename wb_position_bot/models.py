@@ -53,6 +53,7 @@ class SearchResultItem:
     rating: float | None = None
     feedbacks: int | None = None
     url: str = ""
+    alternate_ids: tuple[str, ...] = ()
 
     def identity_key(self) -> str:
         if self.external_id:
@@ -80,6 +81,7 @@ class PositionAnalysis:
     match_reason: str
     pages_checked: int
     warnings: list[str]
+    search_scope: str = ""
 
     def with_target(self, target: ProductTarget) -> "PositionAnalysis":
         return replace(self, target=target)

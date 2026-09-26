@@ -88,6 +88,11 @@ def ym_client(context: ContextTypes.DEFAULT_TYPE) -> YandexMarketClient:
         proxy_auth_token=config.ym_proxy_auth_token,
         proxy_insecure_ssl=config.ym_proxy_insecure_ssl,
         enrich_sellers=config.ym_enrich_sellers,
+        apify_api_token=config.apify_api_token,
+        apify_api_url=config.ym_apify_api_url,
+        apify_max_items=config.ym_apify_max_items,
+        apify_timeout=config.ym_apify_timeout,
+        apify_enrich_products=config.ym_apify_enrich_products,
     )
 
 
@@ -97,6 +102,12 @@ def client_for_target(context: ContextTypes.DEFAULT_TYPE, target: ProductTarget)
 
 def max_pages_for_target(config: Config, target: ProductTarget) -> int:
     return config.ym_max_search_pages if target.marketplace == "ym" else config.wb_max_search_pages
+
+
+def chart_limit_for_target(config: Config, target: ProductTarget) -> int:
+    if target.marketplace == "ym" and config.apify_api_token:
+        return config.ym_apify_max_items
+    return max_pages_for_target(config, target)
 
 
 def check_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
@@ -428,8 +439,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Яндекс Маркет: {ym_count}\n"
         f"Активных: {active_count}\n"
         f"Автоотчеты: {', '.join(config.report_times)} каждые {config.report_interval_days} дн.\n"
-        f"Страниц: WB {config.wb_max_search_pages}, Яндекс {config.ym_max_search_pages}"
-        f"{users_line}"
+        f"Лимит WB: {config.wb_max_search_pages} стр.\n"
+        + (
+            f"Лимит Яндекс: первые {config.ym_apify_max_items} позиций через Apify"
+            if config.apify_api_token
+            else f"Лимит Яндекс: {config.ym_max_search_pages} стр. напрямую"
+        )
+        + users_line
     )
 
 
@@ -721,7 +737,11 @@ async def send_marketplace_overview(
             x_end=x_end,
             weekly=not all_time,
             max_search_pages=(
-                config.ym_max_search_pages if marketplace == "ym" else config.wb_max_search_pages
+                config.ym_apify_max_items
+                if marketplace == "ym" and config.apify_api_token
+                else config.ym_max_search_pages
+                if marketplace == "ym"
+                else config.wb_max_search_pages
             ),
         )
     except RuntimeError as error:
@@ -780,7 +800,7 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             points,
             output,
             week_range,
-            max_search_pages=max_pages_for_target(config, target),
+            max_search_pages=chart_limit_for_target(config, target),
         )
     except RuntimeError as error:
         await update.effective_message.reply_text(f"Не удалось построить график: {error}")

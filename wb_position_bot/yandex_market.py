@@ -21,6 +21,12 @@ class YandexMarketError(RuntimeError):
     pass
 
 
+APIFY_YANDEX_ENDPOINT = (
+    "https://api.apify.com/v2/actors/zen-studio~yandex-market-scraper-parser/"
+    "run-sync-get-dataset-items"
+)
+
+
 TRANSIENT_NETWORK_ERRORS = (
     urllib.error.URLError,
     TimeoutError,
@@ -43,6 +49,11 @@ class YandexMarketClient:
         proxy_auth_token: str = "",
         proxy_insecure_ssl: bool = False,
         enrich_sellers: bool = True,
+        apify_api_token: str = "",
+        apify_api_url: str = APIFY_YANDEX_ENDPOINT,
+        apify_max_items: int = 50,
+        apify_timeout: float = 240.0,
+        apify_enrich_products: bool = True,
     ) -> None:
         self.region_id = int(region_id)
         self.timeout = float(timeout)
@@ -51,13 +62,20 @@ class YandexMarketClient:
         self.retries = max(int(retries or 1), 1)
         self.proxy_url = str(proxy_url or "")
         self.enrich_sellers = bool(enrich_sellers)
+        self.apify_api_token = str(apify_api_token or "").strip()
+        self.apify_api_url = str(apify_api_url or APIFY_YANDEX_ENDPOINT).strip()
+        self.apify_max_items = max(int(apify_max_items or 1), 1)
+        self.apify_timeout = max(float(apify_timeout or 1), 1.0)
+        self.apify_enrich_products = bool(apify_enrich_products)
         self.opener = build_opener(
             self.proxy_url,
             insecure_ssl=proxy_insecure_ssl,
             proxy_auth_token=proxy_auth_token,
         )
+        self.apify_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self._last_request_at = 0.0
         self._seller_cache: dict[int, str] = {}
+        self._apify_cache: dict[str, list[SearchResultItem]] = {}
         self._operation_deadline: float | None = None
 
     def start_operation(self, timeout_seconds: float) -> None:
@@ -68,6 +86,8 @@ class YandexMarketClient:
         self._operation_deadline = None
 
     def search(self, query: str, page: int = 1) -> list[SearchResultItem]:
+        if self.apify_api_token:
+            return self._search_apify(query, page)
         params = {
             "text": query,
             "lr": str(self.region_id),
@@ -80,6 +100,78 @@ class YandexMarketClient:
         if page == 1 and self.enrich_sellers:
             items = self._enrich_top_sellers(items, limit=5)
         return items
+
+    def not_found_scope(self, pages_checked: int, items_checked: int) -> str:
+        if self.apify_api_token:
+            return f"среди первых {items_checked} позиций выдачи"
+        return f"за {pages_checked} стр. выдачи"
+
+    def _search_apify(self, query: str, page: int) -> list[SearchResultItem]:
+        if page > 1:
+            return []
+        query_key = " ".join(str(query or "").casefold().split())
+        if query_key in self._apify_cache:
+            return self._apify_cache[query_key]
+
+        payload = self._post_apify_json(
+            {
+                "query": query,
+                "maxItems": self.apify_max_items,
+                "enrichProducts": self.apify_enrich_products,
+                "includeReviews": False,
+                "region": str(self.region_id),
+            }
+        )
+        items = parse_apify_search_items(payload)
+        self._apify_cache[query_key] = items
+        return items
+
+    def _post_apify_json(self, body: dict[str, Any]) -> list[dict[str, Any]]:
+        params = urllib.parse.urlencode(
+            {
+                "timeout": min(max(int(self.apify_timeout), 1), 300),
+                "maxChargedDatasetItems": self.apify_max_items,
+            }
+        )
+        separator = "&" if "?" in self.apify_api_url else "?"
+        url = f"{self.apify_api_url}{separator}{params}"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.apify_api_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "marketplace-position-bot/1.0",
+            },
+        )
+        remaining = self._remaining_time()
+        timeout = min(self.apify_timeout, remaining) if remaining is not None else self.apify_timeout
+        try:
+            with self.apify_opener.open(request, timeout=max(timeout, 1.0)) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as error:
+            details = error.read().decode("utf-8", errors="replace")
+            raise YandexMarketError(
+                f"Apify вернул HTTP {error.code}: {apify_error_preview(details)}"
+            ) from error
+        except TRANSIENT_NETWORK_ERRORS as error:
+            raise YandexMarketError(
+                "соединение с Apify прервалось; повтори проверку позже, чтобы не запустить платный запрос дважды"
+            ) from error
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise YandexMarketError(
+                f"Apify вернул ответ не в формате JSON: {apify_error_preview(raw)}"
+            ) from error
+        if not isinstance(payload, list):
+            raise YandexMarketError(
+                f"Apify не вернул список товаров: {apify_error_preview(payload)}"
+            )
+        return [item for item in payload if isinstance(item, dict)]
 
     def _enrich_top_sellers(self, items: list[SearchResultItem], limit: int) -> list[SearchResultItem]:
         enriched = list(items)
@@ -168,6 +260,76 @@ class YandexMarketClient:
             time.sleep(remaining)
             raise YandexMarketError("проверка превысила допустимое время и была остановлена")
         time.sleep(seconds)
+
+
+def parse_apify_search_items(rows: list[dict[str, Any]]) -> list[SearchResultItem]:
+    positioned: list[tuple[int, int, SearchResultItem]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        id_candidates = unique_text_values(
+            row,
+            "oskuId",
+            "articleNumber",
+            "marketSku",
+            "sku",
+            "modelId",
+        )
+        url = first_text(row, "productUrl", "canonicalUrl", "url")
+        url_id = yandex_id_from_url(url)
+        if url_id and url_id not in id_candidates:
+            id_candidates.insert(0, url_id)
+        if not id_candidates:
+            continue
+
+        external_id = id_candidates[0]
+        identity = external_id or url
+        if identity in seen:
+            continue
+        seen.add(identity)
+
+        price = parse_market_price(row.get("price"))
+        position = first_int(row, "searchPosition", "position") or index + 1
+        item = SearchResultItem(
+            rank=position,
+            nm_id=first_int(row, "modelId") or 0,
+            external_id=external_id,
+            alternate_ids=tuple(value for value in id_candidates if value != external_id),
+            name=first_text(row, "title", "name", "modelName"),
+            brand=first_text(row, "brand"),
+            supplier_id=first_int(row, "businessId", "shopId", "supplierId", "vendorId"),
+            supplier_name=first_text(row, "sellerName", "shopName", "supplierName"),
+            price=price,
+            sale_price=price,
+            rating=parse_float(row.get("rating")),
+            feedbacks=first_int(row, "reviewCount", "ratingCount"),
+            url=url or f"https://market.yandex.ru/card/-/{external_id}",
+        )
+        positioned.append((position, index, item))
+
+    positioned.sort(key=lambda value: (value[0], value[1]))
+    return [item for _, _, item in positioned]
+
+
+def unique_text_values(item: dict[str, Any], *keys: str) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = first_text(item, key)
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def yandex_id_from_url(url: str) -> str:
+    match = re.search(r"/(?:card/[^/?#]+|product--[^/?#]+)/(?P<id>\d+)(?:[/?#]|$)", str(url or ""))
+    return match.group("id") if match else ""
+
+
+def apify_error_preview(value: Any, limit: int = 240) -> str:
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value or "")
+    return re.sub(r"\s+", " ", text).strip()[:limit] or "пустой ответ"
 
 
 def parse_yandex_search_html(raw: str) -> list[SearchResultItem]:

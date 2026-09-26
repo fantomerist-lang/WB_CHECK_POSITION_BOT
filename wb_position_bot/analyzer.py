@@ -28,7 +28,8 @@ def target_identity_warning(target: ProductTarget) -> str | None:
 
 
 def match_target(item: SearchResultItem, target: ProductTarget) -> tuple[bool, str]:
-    if target.external_id and target.external_id in {item.external_id, str(item.nm_id or "")}:
+    item_ids = {item.external_id, str(item.nm_id or ""), *item.alternate_ids}
+    if target.external_id and target.external_id in item_ids:
         return True, "external_id"
     if target.nm_id and item.nm_id == target.nm_id:
         return True, "nm_id"
@@ -90,8 +91,12 @@ def analyze_target(
         if own_item is not None and len(top_items) >= top_limit:
             break
 
+    search_scope = f"за {pages_checked} стр. выдачи"
+    scope_formatter = getattr(client, "not_found_scope", None)
+    if callable(scope_formatter):
+        search_scope = str(scope_formatter(pages_checked, rank))
     if own_item is None:
-        warnings.append(f"Своя карточка не найдена за {pages_checked} стр. выдачи.")
+        warnings.append(f"Своя карточка не найдена {search_scope}.")
 
     return PositionAnalysis(
         target=target,
@@ -103,4 +108,5 @@ def analyze_target(
         match_reason=match_reason,
         pages_checked=pages_checked,
         warnings=warnings,
+        search_scope=search_scope,
     )
