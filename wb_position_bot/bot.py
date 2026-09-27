@@ -6,7 +6,7 @@ import logging
 import secrets
 from dataclasses import replace
 from pathlib import Path
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time
 
 from telegram import Update
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
@@ -232,8 +232,6 @@ HELP_TEXT = """КАК РАБОТАЕТ БОТ
 /users — показать пользователей (только владелец)
 /removeuser CHAT_ID — закрыть доступ (только владелец)
 
-У каждого приглашенного пользователя отдельные запросы. Он не видит записи владельца; владелец видит все записи и получает копии его команд.
-
 /start — запустить бота
 /help — снова показать эту инструкцию
 
@@ -245,6 +243,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if update.effective_message:
         await update.effective_message.reply_text(HELP_TEXT)
+
+
+def invite_code_matches(stored_code: str, supplied_code: str) -> bool:
+    return bool(stored_code) and bool(supplied_code) and hmac.compare_digest(stored_code, supplied_code)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -259,22 +261,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if saved or config.admin_chat_id:
         if not is_admin(update, context):
             if get_authorized_user(conn, chat.id):
-                await update.effective_message.reply_text(f"Готов. У тебя отдельный набор запросов.\n\n{HELP_TEXT}")
+                await update.effective_message.reply_text(f"Готов.\n\n{HELP_TEXT}")
                 return
             invite_code = get_setting(conn, "member_invite_code") or ""
-            invite_expires = get_setting(conn, "member_invite_expires") or ""
             supplied_code = args[0] if args else ""
-            try:
-                expires_at = datetime.fromisoformat(invite_expires)
-            except ValueError:
-                expires_at = datetime.min.replace(tzinfo=timezone.utc)
-            invite_valid = (
-                bool(invite_code)
-                and bool(supplied_code)
-                and hmac.compare_digest(invite_code, supplied_code)
-                and expires_at > datetime.now(timezone.utc)
-            )
-            if not invite_valid:
+            if not invite_code_matches(invite_code, supplied_code):
                 await update.effective_message.reply_text(
                     "Бот уже привязан к владельцу. Для доступа попроси у него одноразовую команду приглашения."
                 )
@@ -299,7 +290,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     admin_id,
                     f"Подключен второй пользователь: {label} (chat_id {chat.id}).",
                 )
-            await update.effective_message.reply_text(f"Доступ открыт. У тебя отдельный набор запросов.\n\n{HELP_TEXT}")
+            await update.effective_message.reply_text(f"Доступ открыт.\n\n{HELP_TEXT}")
             return
     elif config.setup_key and config.setup_key != "change-me" and (not args or args[0] != config.setup_key):
         await update.effective_message.reply_text("Для первого запуска напиши /start SETUP_KEY.")
@@ -327,13 +318,12 @@ async def invite_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     code = secrets.token_urlsafe(6)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     set_setting(conn, "member_invite_code", code)
-    set_setting(conn, "member_invite_expires", expires_at.isoformat())
+    delete_setting(conn, "member_invite_expires")
     await update.effective_message.reply_text(
         "Перешли второму пользователю эту команду:\n\n"
         f"/start {code}\n\n"
-        "Код одноразовый и действует 24 часа."
+        "Код одноразовый и не имеет срока действия. Новая команда /invite заменит этот код."
     )
 
 
