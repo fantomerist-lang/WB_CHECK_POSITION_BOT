@@ -19,6 +19,7 @@ from .analytics import (
     format_history_summary,
     load_position_history,
     render_position_chart,
+    render_marketplace_legend_chart,
     render_marketplace_overview_chart,
     render_week_position_chart,
 )
@@ -693,7 +694,8 @@ async def send_marketplace_overview(
 
     if all_time:
         series = marketplace_series(conn, marketplace_targets, config, marketplace)
-        output = marketplace_chart_path(context, "stats", marketplace, "all-time")
+        output = marketplace_chart_path(context, "stats", marketplace, "all-time-graph")
+        legend_output = marketplace_chart_path(context, "stats", marketplace, "all-time-legend")
         period_title = "Статистика за все время"
         x_start = None
         x_end = None
@@ -708,7 +710,8 @@ async def send_marketplace_overview(
             start=week_range.start,
             end=week_range.end,
         )
-        output = marketplace_chart_path(context, "week", marketplace, week_range.key)
+        output = marketplace_chart_path(context, "week", marketplace, f"{week_range.key}-graph")
+        legend_output = marketplace_chart_path(context, "week", marketplace, f"{week_range.key}-legend")
         period_title = f"Неделя {week_range.label()}"
         x_start = week_range.start
         x_end = week_range.end
@@ -721,6 +724,12 @@ async def send_marketplace_overview(
         return False
 
     try:
+        render_marketplace_legend_chart(
+            series,
+            legend_output,
+            marketplace=marketplace,
+            period_title=period_title,
+        )
         render_marketplace_overview_chart(
             series,
             output,
@@ -736,6 +745,8 @@ async def send_marketplace_overview(
                 if marketplace == "ym"
                 else config.wb_max_search_pages
             ),
+            show_legend=False,
+            show_point_labels=False,
         )
     except RuntimeError as error:
         await safe_send_message(context, chat_id, f"Не удалось построить график {marketplace_label}: {error}")
@@ -744,8 +755,14 @@ async def send_marketplace_overview(
     await safe_send_photo(
         context,
         chat_id,
+        legend_output,
+        caption=f"{marketplace_label}: легенда запросов {suffix}",
+    )
+    await safe_send_photo(
+        context,
+        chat_id,
         output,
-        caption=f"{marketplace_label}: все поисковые запросы {suffix}",
+        caption=f"{marketplace_label}: полный график {suffix}",
     )
     return True
 

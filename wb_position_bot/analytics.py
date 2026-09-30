@@ -418,6 +418,107 @@ SERIES_COLORS = (
 )
 
 
+def _legend_column_count(series_count: int) -> int:
+    """Keep a large legend compact while leaving enough width for query names."""
+    if series_count <= 4:
+        return 1
+    if series_count <= 32:
+        return 2
+    if series_count <= 60:
+        return 3
+    return 4
+
+
+def _legend_layout(series_count: int) -> tuple[int, int, int, int, int]:
+    columns = _legend_column_count(series_count)
+    font_size = 16 if series_count <= 12 else 14 if series_count <= 36 else 12
+    rows = max((series_count + columns - 1) // columns, 1)
+    row_height = max(22, font_size + 8)
+    legend_height = rows * row_height + 18
+    label_limit = {1: 62, 2: 54, 3: 34, 4: 25}.get(columns, 22)
+    return columns, rows, row_height, legend_height, label_limit
+
+
+def _draw_marketplace_legend(
+    draw: ImageDraw.ImageDraw,
+    series: list[PositionSeries],
+    width: int,
+    legend_top: int,
+    ink: str,
+    include_latest_position: bool = False,
+) -> int:
+    columns, rows, row_height, legend_height, label_limit = _legend_layout(len(series))
+    legend_font_size = 16 if len(series) <= 12 else 14 if len(series) <= 36 else 12
+    legend_font = _font(legend_font_size)
+    if include_latest_position and columns == 2:
+        label_limit = 40
+    column_width = (width - 108) // columns
+    for index, item in enumerate(series):
+        column = index // rows
+        row = index % rows
+        x = 56 + column * column_width
+        y = legend_top + row * row_height
+        color = SERIES_COLORS[index % len(SERIES_COLORS)]
+        draw.line((x, y + 10, x + 28, y + 10), fill=color, width=5)
+        draw.ellipse((x + 10, y + 5, x + 20, y + 15), fill=color)
+        latest = max(item.points, key=lambda point: point.checked_at, default=None)
+        latest_text = f"последняя {position_label(latest.position)}" if latest else "нет данных"
+        suffix_length = len(latest_text) + 3 if include_latest_position else 0
+        query_limit = max(label_limit - suffix_length, 8)
+        label = f"{index + 1}. {_ellipsize(item.target.search_query, query_limit)}"
+        if include_latest_position:
+            label += f" | {latest_text}"
+        draw.text((x + 38, y), label, fill=ink, font=legend_font)
+    return legend_height
+
+
+def render_marketplace_legend_chart(
+    series: list[PositionSeries],
+    output_path: str | Path,
+    marketplace: str,
+    period_title: str,
+    width: int = 1400,
+    height: int = 420,
+) -> Path:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    marketplace_label = "Яндекс Маркет" if marketplace == "ym" else "Wildberries"
+    bg = "#f8fafc"
+    ink = "#102033"
+    muted = "#64748b"
+    title_font = _font(38, bold=True)
+    subtitle_font = _font(21)
+    legend_top = 124
+    _, _, _, legend_height, _ = _legend_layout(len(series))
+    height = max(height, legend_top + legend_height + 72)
+
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+    draw.text(
+        (54, 28),
+        f"Легенда: {marketplace_label}",
+        fill=ink,
+        font=title_font,
+    )
+    draw.text(
+        (56, 82),
+        f"{period_title} | Запросов: {len(series)} | Цвет соответствует линии на графике",
+        fill=muted,
+        font=subtitle_font,
+    )
+    _draw_marketplace_legend(
+        draw,
+        series,
+        width,
+        legend_top,
+        ink,
+        include_latest_position=True,
+    )
+    image.save(output)
+    return output
+
+
 def render_marketplace_overview_chart(
     series: list[PositionSeries],
     output_path: str | Path,
@@ -429,6 +530,8 @@ def render_marketplace_overview_chart(
     max_search_pages: int = 20,
     width: int = 1400,
     height: int = 900,
+    show_legend: bool = True,
+    show_point_labels: bool = True,
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -439,14 +542,20 @@ def render_marketplace_overview_chart(
     muted = "#64748b"
     grid = "#d8e0ea"
 
-    image = Image.new("RGB", (width, height), bg)
-    draw = ImageDraw.Draw(image)
     title_font = _font(38, bold=True)
     subtitle_font = _font(21)
-    legend_font = _font(16)
     axis_font = _font(16)
     tiny_font = _font(13)
     point_font = _font(14, bold=True)
+
+    legend_top = 124
+    _, _, _, legend_height, _ = _legend_layout(len(series)) if show_legend else (0, 0, 0, 0, 0)
+    chart_top = legend_top + legend_height + 28 if show_legend else 136
+    # Keep the plotting area usable even when the legend grows beyond the default height.
+    height = max(height, chart_top + 460)
+
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
 
     draw.text(
         (54, 28),
@@ -461,24 +570,9 @@ def render_marketplace_overview_chart(
         font=subtitle_font,
     )
 
-    legend_top = 124
-    columns = 2 if len(series) > 4 else 1
-    rows = max((len(series) + columns - 1) // columns, 1)
-    legend_row_height = 27
-    legend_height = rows * legend_row_height + 18
-    column_width = (width - 108) // columns
-    for index, item in enumerate(series):
-        column = index // rows
-        row = index % rows
-        x = 56 + column * column_width
-        y = legend_top + row * legend_row_height
-        color = SERIES_COLORS[index % len(SERIES_COLORS)]
-        draw.line((x, y + 10, x + 28, y + 10), fill=color, width=5)
-        draw.ellipse((x + 10, y + 5, x + 20, y + 15), fill=color)
-        label = f"{index + 1}. {_ellipsize(item.target.search_query, 62 if columns == 1 else 48)}"
-        draw.text((x + 38, y), label, fill=ink, font=legend_font)
+    if show_legend:
+        _draw_marketplace_legend(draw, series, width, legend_top, ink)
 
-    chart_top = legend_top + legend_height + 28
     left, right, bottom = 86, width - 54, height - 104
     draw.rounded_rectangle(
         (left, chart_top, right, bottom),
@@ -532,6 +626,12 @@ def render_marketplace_overview_chart(
         last_labels: list[tuple[float, float, int, str]] = []
         for index, item in enumerate(series):
             color = SERIES_COLORS[index % len(SERIES_COLORS)]
+            # Separate coincident points slightly so many queries checked on the
+            # same day and at the same position remain individually visible.
+            series_jitter = 0.0
+            if len(series) > 4:
+                jitter_step = min(4.0, 72.0 / len(series))
+                series_jitter = (index - (len(series) - 1) / 2) * jitter_step
             if weekly and x_start and x_end:
                 points_by_slot = _latest_points_by_weekday(item.points, WeekRange(x_start, x_end))
                 plot_points = [
@@ -548,7 +648,8 @@ def render_marketplace_overview_chart(
             previous: tuple[float, float] | None = None
             found_marks: list[tuple[float, float, int]] = []
             for slot, point in plot_points:
-                x = x_for_slot(slot)
+                x = x_for_slot(slot) + series_jitter
+                x = min(max(x, left + 6), right - 6)
                 if point.position is None:
                     offset = ((index % 5) - 2) * 5
                     _draw_colored_cross(draw, x + offset, bottom - 12 - (index // 5) * 10, color)
@@ -562,11 +663,11 @@ def render_marketplace_overview_chart(
 
             for x, y, position in found_marks:
                 draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=color, outline="#ffffff", width=2)
-            if len(series) <= 4:
+            if show_point_labels and len(series) <= 4:
                 for x, y, position in found_marks:
                     label_y = y - 23 if y - 26 > chart_top else y + 12
                     draw.text((x, label_y), f"#{position}", fill=color, font=point_font, anchor="mm")
-            elif found_marks:
+            elif show_point_labels and found_marks:
                 x, y, position = found_marks[-1]
                 last_labels.append((x, y, position, color))
 
@@ -881,17 +982,18 @@ def _draw_resolved_last_labels(
 ) -> None:
     ordered = sorted(labels, key=lambda item: item[1])
     positions: list[float] = []
-    minimum_gap = 19
+    # Leave breathing room so a dense stack never touches the plot border.
+    first_label_y = top + 30
+    last_label_y = bottom - 30
+    available_height = max(last_label_y - first_label_y, 1)
+    minimum_gap = min(19, available_height / max(len(ordered) - 1, 1))
     for _, y, _, _ in ordered:
-        label_y = max(y, top + 12)
+        label_y = max(y, first_label_y)
         if positions:
             label_y = max(label_y, positions[-1] + minimum_gap)
         positions.append(label_y)
-    overflow = positions[-1] - (bottom - 12)
-    if overflow > 0:
-        positions = [value - overflow for value in positions]
-        for index in range(len(positions) - 2, -1, -1):
-            positions[index] = min(positions[index], positions[index + 1] - minimum_gap)
+    if positions and positions[-1] > last_label_y:
+        positions = [first_label_y + index * minimum_gap for index in range(len(ordered))]
 
     for (x, _, position, color), label_y in zip(ordered, positions):
         draw.text(
