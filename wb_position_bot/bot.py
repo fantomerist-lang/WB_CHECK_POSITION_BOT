@@ -30,6 +30,8 @@ from .db import (
     authorize_user,
     claim_unowned_targets,
     connect,
+    consume_member_invite,
+    create_member_invite,
     delete_setting,
     disable_targets_for_owner,
     get_authorized_user,
@@ -228,9 +230,9 @@ HELP_TEXT = """КАК РАБОТАЕТ БОТ
 /statsym — все запросы Яндекс Маркета за всё время
 
 ДОСТУП
-/invite — создать приглашение для второго пользователя (только владелец)
-/users — показать пользователей (только владелец)
-/removeuser CHAT_ID — закрыть доступ (только владелец)
+/invite — создать бессрочное приглашение для нового пользователя (только владелец)
+/users — показать подключенных пользователей (только владелец)
+/removeuser CHAT_ID — закрыть доступ пользователя (только владелец)
 
 /start — запустить бота
 /help — снова показать эту инструкцию
@@ -263,15 +265,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if get_authorized_user(conn, chat.id):
                 await update.effective_message.reply_text(f"Готов.\n\n{HELP_TEXT}")
                 return
-            invite_code = get_setting(conn, "member_invite_code") or ""
             supplied_code = args[0] if args else ""
-            if not invite_code_matches(invite_code, supplied_code):
+            invite_claimed = bool(supplied_code) and consume_member_invite(conn, supplied_code, chat.id)
+            legacy_code = get_setting(conn, "member_invite_code") or ""
+            legacy_invite = invite_code_matches(legacy_code, supplied_code)
+            if not invite_claimed and not legacy_invite:
                 await update.effective_message.reply_text(
-                    "Бот уже привязан к владельцу. Для доступа попроси у него одноразовую команду приглашения."
+                    "Бот уже привязан к владельцу. Для доступа попроси у него команду приглашения."
                 )
-                return
-            if active_authorized_users(conn):
-                await update.effective_message.reply_text("Место второго пользователя уже занято.")
                 return
             user = update.effective_user
             authorize_user(
@@ -280,15 +281,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 username=user.username if user else "",
                 display_name=user.full_name if user else "",
             )
-            delete_setting(conn, "member_invite_code")
-            delete_setting(conn, "member_invite_expires")
+            if legacy_invite:
+                delete_setting(conn, "member_invite_code")
+                delete_setting(conn, "member_invite_expires")
             admin_id = configured_admin_chat_id(context)
             if admin_id:
                 label = user.full_name if user else str(chat.id)
                 await safe_send_message(
                     context,
                     admin_id,
-                    f"Подключен второй пользователь: {label} (chat_id {chat.id}).",
+                    f"Подключен пользователь: {label} (chat_id {chat.id}).",
                 )
             await update.effective_message.reply_text(f"Доступ открыт.\n\n{HELP_TEXT}")
             return
@@ -307,23 +309,12 @@ async def invite_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not await ensure_admin(update, context):
         return
     conn = connect(db_path(context))
-    users = active_authorized_users(conn)
-    if users:
-        user = users[0]
-        label = str(user["display_name"] or user["username"] or user["chat_id"])
-        await update.effective_message.reply_text(
-            f"Второй пользователь уже подключен: {label} (chat_id {user['chat_id']}).\n"
-            "Сначала закрой ему доступ командой /removeuser CHAT_ID."
-        )
-        return
-
     code = secrets.token_urlsafe(6)
-    set_setting(conn, "member_invite_code", code)
-    delete_setting(conn, "member_invite_expires")
+    create_member_invite(conn, code)
     await update.effective_message.reply_text(
-        "Перешли второму пользователю эту команду:\n\n"
+        "Перешли новому пользователю эту команду:\n\n"
         f"/start {code}\n\n"
-        "Код одноразовый и не имеет срока действия. Новая команда /invite заменит этот код."
+        "Код одноразовый и не имеет срока действия. Можно создать любое количество приглашений."
     )
 
 
@@ -335,7 +326,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines = [f"Владелец: chat_id {admin_id}"]
     users = active_authorized_users(conn)
     if not users:
-        lines.append("Второй пользователь: не подключен")
+        lines.append("Подключенных пользователей нет")
     for user in users:
         label = str(user["display_name"] or user["username"] or "без имени")
         username = f"@{user['username']}" if user["username"] else "без username"
@@ -619,7 +610,19 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         save_position_check(conn, analysis, check_source="manual")
-        await update.effective_message.reply_text(format_analysis(analysis), disable_web_page_preview=True)
+        report = format_analysis(analysis)
+        await update.effective_message.reply_text(report, disable_web_page_preview=True)
+        if not is_admin_chat(context, update.effective_chat.id):
+            user = update.effective_user
+            label = user.full_name if user else str(update.effective_chat.id)
+            admin_id = configured_admin_chat_id(context)
+            if admin_id:
+                await safe_send_message(
+                    context,
+                    admin_id,
+                    f"Ручная проверка пользователя {label} (chat_id {update.effective_chat.id}):\n\n{report}",
+                    disable_web_page_preview=True,
+                )
 
 
 async def checkall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -948,8 +951,25 @@ async def run_checks_for_chat_unlocked(
         analyses.append(analysis)
 
     if analyses:
-        for message in format_full_report_messages(analyses):
+        report_messages = format_full_report_messages(analyses)
+        for message in report_messages:
             await safe_send_message(context, chat_id, message, disable_web_page_preview=True)
+        if not auto and not is_admin_chat(context, chat_id):
+            user_row = get_authorized_user(conn, chat_id)
+            label = str(
+                (user_row["display_name"] if user_row else "")
+                or (user_row["username"] if user_row else "")
+                or chat_id
+            )
+            admin_id = configured_admin_chat_id(context)
+            if admin_id:
+                await safe_send_message(
+                    context,
+                    admin_id,
+                    f"Ручной общий отчет пользователя {label} (chat_id {chat_id}):",
+                )
+                for message in report_messages:
+                    await safe_send_message(context, admin_id, message, disable_web_page_preview=True)
 
     if auto:
         await send_marketplace_overview(context, chat_id, "wb", notify_if_empty=False)

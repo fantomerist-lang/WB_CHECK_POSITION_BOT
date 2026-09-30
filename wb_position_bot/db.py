@@ -52,6 +52,17 @@ def migrate(conn: sqlite3.Connection) -> None:
           updated_at text not null default current_timestamp
         );
 
+        create table if not exists member_invites (
+          id integer primary key autoincrement,
+          code text not null unique,
+          created_at text not null default current_timestamp,
+          used_at text,
+          used_by_chat_id integer
+        );
+
+        create index if not exists idx_member_invites_pending
+          on member_invites(code, used_at);
+
         create table if not exists position_checks (
           id integer primary key autoincrement,
           product_id integer not null,
@@ -117,6 +128,27 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
 def delete_setting(conn: sqlite3.Connection, key: str) -> None:
     conn.execute("delete from settings where key = ?", (key,))
     conn.commit()
+
+
+def create_member_invite(conn: sqlite3.Connection, code: str) -> None:
+    """Store a never-expiring, one-time invite without replacing other invites."""
+    conn.execute("insert into member_invites(code) values (?)", (str(code),))
+    conn.commit()
+
+
+def consume_member_invite(conn: sqlite3.Connection, code: str, chat_id: int) -> bool:
+    """Atomically claim an unused invite; returns False for invalid or used codes."""
+    cursor = conn.execute(
+        """
+        update member_invites
+        set used_at = current_timestamp,
+            used_by_chat_id = ?
+        where code = ? and used_at is null
+        """,
+        (int(chat_id), str(code)),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 def authorize_user(conn: sqlite3.Connection, chat_id: int, username: str = "", display_name: str = "") -> None:
