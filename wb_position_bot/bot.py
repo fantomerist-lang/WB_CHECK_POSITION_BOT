@@ -18,9 +18,8 @@ from .analytics import (
     format_all_targets_summary,
     format_history_summary,
     load_position_history,
+    render_marketplace_report_pdf,
     render_position_chart,
-    render_marketplace_legend_chart,
-    render_marketplace_overview_chart,
     render_week_position_chart,
 )
 from .analyzer import analyze_target
@@ -640,7 +639,7 @@ def chart_path(context: ContextTypes.DEFAULT_TYPE, prefix: str, target: ProductT
     return reports_dir / f"{prefix}-{safe_id}-{suffix}.png"
 
 
-def marketplace_chart_path(
+def marketplace_report_path(
     context: ContextTypes.DEFAULT_TYPE,
     prefix: str,
     marketplace: str,
@@ -648,7 +647,7 @@ def marketplace_chart_path(
 ) -> Path:
     database_path = Path(db_path(context))
     reports_dir = database_path.parent / "reports"
-    return reports_dir / f"{prefix}-{marketplace}-{suffix}.png"
+    return reports_dir / f"{prefix}-{marketplace}-{suffix}.pdf"
 
 
 def marketplace_series(
@@ -694,11 +693,9 @@ async def send_marketplace_overview(
 
     if all_time:
         series = marketplace_series(conn, marketplace_targets, config, marketplace)
-        output = marketplace_chart_path(context, "stats", marketplace, "all-time-graph")
-        legend_output = marketplace_chart_path(context, "stats", marketplace, "all-time-legend")
+        output = marketplace_report_path(context, "stats", marketplace, "all-time-report")
         period_title = "Статистика за все время"
-        x_start = None
-        x_end = None
+        week_range = None
         suffix = "за все время"
     else:
         week_range = current_week_range(config.timezone)
@@ -710,11 +707,8 @@ async def send_marketplace_overview(
             start=week_range.start,
             end=week_range.end,
         )
-        output = marketplace_chart_path(context, "week", marketplace, f"{week_range.key}-graph")
-        legend_output = marketplace_chart_path(context, "week", marketplace, f"{week_range.key}-legend")
+        output = marketplace_report_path(context, "week", marketplace, f"{week_range.key}-report")
         period_title = f"Неделя {week_range.label()}"
-        x_start = week_range.start
-        x_end = week_range.end
         suffix = "за текущую неделю"
 
     series = [item for item in series if item.target.active or item.points]
@@ -724,20 +718,11 @@ async def send_marketplace_overview(
         return False
 
     try:
-        render_marketplace_legend_chart(
-            series,
-            legend_output,
-            marketplace=marketplace,
-            period_title=period_title,
-        )
-        render_marketplace_overview_chart(
+        render_marketplace_report_pdf(
             series,
             output,
             marketplace=marketplace,
             period_title=period_title,
-            x_start=x_start,
-            x_end=x_end,
-            weekly=not all_time,
             max_search_pages=(
                 config.ym_apify_max_items
                 if marketplace == "ym" and config.apify_api_token
@@ -745,24 +730,17 @@ async def send_marketplace_overview(
                 if marketplace == "ym"
                 else config.wb_max_search_pages
             ),
-            show_legend=False,
-            show_point_labels=False,
+            week_range=week_range,
         )
     except RuntimeError as error:
         await safe_send_message(context, chat_id, f"Не удалось построить график {marketplace_label}: {error}")
         return False
 
-    await safe_send_photo(
-        context,
-        chat_id,
-        legend_output,
-        caption=f"{marketplace_label}: легенда запросов {suffix}",
-    )
-    await safe_send_photo(
+    await safe_send_document(
         context,
         chat_id,
         output,
-        caption=f"{marketplace_label}: полный график {suffix}",
+        caption=f"{marketplace_label}: PDF-отчет по запросам {suffix}",
     )
     return True
 
@@ -1029,6 +1007,33 @@ async def safe_send_photo(
         try:
             with path.open("rb") as photo:
                 await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption[:1000])
+            return
+        except RetryAfter as error:
+            await asyncio.sleep(float(error.retry_after or 3) + 0.5)
+        except (TimedOut, NetworkError):
+            if attempt >= retries:
+                raise
+            await asyncio.sleep(1.5 * attempt)
+        except TelegramError:
+            raise
+
+
+async def safe_send_document(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    path: Path,
+    caption: str = "",
+    retries: int = 3,
+) -> None:
+    for attempt in range(1, retries + 1):
+        try:
+            with path.open("rb") as document:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=document,
+                    caption=caption[:1000],
+                    filename=path.name,
+                )
             return
         except RetryAfter as error:
             await asyncio.sleep(float(error.retry_after or 3) + 0.5)

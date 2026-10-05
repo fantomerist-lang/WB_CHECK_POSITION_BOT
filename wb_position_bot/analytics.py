@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -227,16 +228,16 @@ def render_position_chart(
     draw.text((54, 82), subtitle, fill=muted, font=font_small)
 
     summary = summarize_history(points)
-    _draw_pill(draw, (54, 124), f"Last {position_label(summary.last_position)}", point_color, font_small)
-    _draw_pill(draw, (260, 124), f"Best {position_label(summary.best_position)}", green, font_small)
-    _draw_pill(draw, (460, 124), f"Checks {summary.total_checks}", "#334155", font_small)
-    _draw_pill(draw, (660, 124), f"Missed {summary.missing_checks}", red, font_small)
+    _draw_pill(draw, (54, 124), f"Последняя {position_label(summary.last_position)}", point_color, font_small)
+    _draw_pill(draw, (320, 124), f"Лучшая {position_label(summary.best_position)}", green, font_small)
+    _draw_pill(draw, (570, 124), f"Проверок {summary.total_checks}", "#334155", font_small)
+    _draw_pill(draw, (810, 124), f"Не найдена {summary.missing_checks}", red, font_small)
 
     left, top, right, bottom = 88, 205, width - 58, height - 92
     draw.rounded_rectangle((left, top, right, bottom), radius=12, outline="#cbd5e1", width=2, fill="#ffffff")
 
     if not points:
-        message = "No saved checks for this period yet"
+        message = "Пока нет сохраненных проверок за этот период"
         box = draw.textbbox((0, 0), message, font=font_regular)
         draw.text(
             ((width - (box[2] - box[0])) / 2, (top + bottom) / 2 - 18),
@@ -277,12 +278,202 @@ def render_position_chart(
         draw.ellipse((x - 7, y - 7, x + 7, y + 7), fill=point_color, outline="#ffffff", width=3)
 
     latest = points[-1]
-    latest_text = f"Latest: {position_label(latest.position)} at {latest.checked_at:%d.%m %H:%M}"
+    latest_text = f"Последняя: {position_label(latest.position)} ({latest.checked_at:%d.%m %H:%M})"
     draw.text((left, bottom + 36), latest_text, fill=ink, font=font_small)
-    draw.text((right - 330, bottom + 36), "Lower is better", fill=muted, font=font_small)
+    draw.text((right - 410, bottom + 36), "Чем выше точка, тем лучше позиция", fill=muted, font=font_small)
 
     image.save(output)
     return output
+
+
+def render_marketplace_report_pdf(
+    series: list[PositionSeries],
+    output_path: str | Path,
+    marketplace: str,
+    period_title: str,
+    max_search_pages: int,
+    week_range: WeekRange | None = None,
+) -> Path:
+    """Create a readable PDF with one full-size position chart per query.
+
+    The data is read from the same PositionPoint history as the PNG charts. The
+    PDF changes presentation only; it never changes or removes stored checks.
+    """
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    marketplace_label = "Яндекс Маркет" if marketplace == "ym" else "Wildberries"
+    pages = [_render_marketplace_pdf_cover(series, marketplace_label, period_title)]
+
+    with tempfile.TemporaryDirectory(prefix=f"{output.stem}-", dir=output.parent) as temp_dir:
+        temp_path = Path(temp_dir)
+        for index, item in enumerate(series, start=1):
+            chart_path = temp_path / f"query-{index}.png"
+            if week_range:
+                render_week_position_chart(
+                    item.target,
+                    item.points,
+                    chart_path,
+                    week_range,
+                    max_search_pages=max_search_pages,
+                )
+            else:
+                render_position_chart(
+                    item.target,
+                    item.points,
+                    chart_path,
+                    title=f"Позиция карточки на {marketplace_label}",
+                    subtitle=(
+                        f"Запрос: {item.target.search_query} | "
+                        f"Карточка: {item.target.label()} | {period_title}"
+                    ),
+                )
+            pages.append(
+                _render_marketplace_pdf_chart_page(
+                    chart_path,
+                    marketplace_label,
+                    period_title,
+                    index,
+                    len(series),
+                )
+            )
+
+    first_page, *remaining_pages = pages
+    first_page.save(
+        output,
+        "PDF",
+        save_all=True,
+        append_images=remaining_pages,
+        resolution=144.0,
+    )
+    for page in pages:
+        page.close()
+    return output
+
+
+def _render_marketplace_pdf_cover(
+    series: list[PositionSeries],
+    marketplace_label: str,
+    period_title: str,
+) -> Image.Image:
+    width, height = 1200, 848
+    image = Image.new("RGB", (width, height), "#f3f7fa")
+    draw = ImageDraw.Draw(image)
+    ink = "#102033"
+    muted = "#64748b"
+    green = "#16826a"
+    blue = "#1769aa"
+    card_border = "#d5e1ea"
+
+    draw.rectangle((0, 0, width, 188), fill=green)
+    draw.text((64, 55), "Отчет по позициям", fill="#ffffff", font=_font(44, bold=True))
+    draw.text((64, 117), marketplace_label, fill="#ffffff", font=_font(27))
+    draw.text((64, 231), period_title, fill=ink, font=_font(27, bold=True))
+    draw.text(
+        (64, 276),
+        "Отдельная страница для каждого поискового запроса",
+        fill=muted,
+        font=_font(20),
+    )
+
+    latest_points = [item.points[-1] for item in series if item.points]
+    found_latest = [point for point in latest_points if point.position is not None]
+    total_checks = sum(len(item.points) for item in series)
+    best_position = min((point.position for point in found_latest), default=None)
+    cards = [
+        (str(len(series)), "поисковых запросов"),
+        (str(len(found_latest)), "найдено в последней проверке"),
+        (str(len(latest_points) - len(found_latest)), "не найдено в последней проверке"),
+        (position_label(best_position), "лучшая текущая позиция"),
+    ]
+    x = 64
+    for value, label in cards:
+        draw.rounded_rectangle((x, 350, x + 250, 512), radius=16, fill="#ffffff", outline=card_border, width=2)
+        draw.text((x + 26, 382), value, fill=blue, font=_font(38, bold=True))
+        _draw_pdf_wrapped_text(draw, (x + 26, 442), label, 202, _font(17), muted, line_spacing=6)
+        x += 273
+
+    draw.text((64, 580), "Как читать отчет", fill=ink, font=_font(28, bold=True))
+    notes = [
+        "На каждой следующей странице только один запрос и один график, поэтому линии не пересекаются.",
+        "Точка означает найденную позицию. Чем ближе к #1, тем лучше результат.",
+        "Крестик означает, что карточка не найдена в пределах проверяемой выдачи за этот день.",
+        f"В документе {len(series) + 1} страниц: сводка и {len(series)} отдельных графиков. Всего сохранено проверок: {total_checks}.",
+    ]
+    y = 630
+    for note in notes:
+        draw.ellipse((70, y + 8, 80, y + 18), fill=green)
+        y = _draw_pdf_wrapped_text(draw, (94, y), note, 1020, _font(17), ink, line_spacing=7) + 14
+
+    _draw_pdf_footer(draw, width, height, 1)
+    return image
+
+
+def _render_marketplace_pdf_chart_page(
+    chart_path: Path,
+    marketplace_label: str,
+    period_title: str,
+    index: int,
+    total: int,
+) -> Image.Image:
+    width, height = 1200, 848
+    image = Image.new("RGB", (width, height), "#f3f7fa")
+    draw = ImageDraw.Draw(image)
+    draw.text(
+        (50, 36),
+        f"{marketplace_label}: запрос {index} из {total}",
+        fill="#102033",
+        font=_font(26, bold=True),
+    )
+    draw.text((50, 74), period_title, fill="#64748b", font=_font(17))
+    with Image.open(chart_path) as chart:
+        chart = chart.convert("RGB")
+        chart.thumbnail((1100, 642), Image.Resampling.LANCZOS)
+        x = (width - chart.width) // 2
+        y = 130 + (642 - chart.height) // 2
+        image.paste(chart, (x, y))
+    _draw_pdf_footer(draw, width, height, index + 1)
+    return image
+
+
+def _draw_pdf_footer(draw: ImageDraw.ImageDraw, width: int, height: int, page_number: int) -> None:
+    draw.line((50, height - 42, width - 50, height - 42), fill="#d5e1ea", width=1)
+    draw.text((50, height - 29), "Отчет сформирован ботом мониторинга маркетплейсов", fill="#64748b", font=_font(13))
+    footer = f"Страница {page_number}"
+    footer_box = draw.textbbox((0, 0), footer, font=_font(13))
+    draw.text((width - 50 - (footer_box[2] - footer_box[0]), height - 29), footer, fill="#64748b", font=_font(13))
+
+
+def _draw_pdf_wrapped_text(
+    draw: ImageDraw.ImageDraw,
+    origin: tuple[int, int],
+    text: str,
+    max_width: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    fill: str,
+    line_spacing: int = 4,
+) -> int:
+    """Draw text within a fixed width and return the y-coordinate after it."""
+
+    x, y = origin
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+
+    line_height = font.getbbox("Аy")[3] + line_spacing
+    for line in lines:
+        draw.text((x, y), line, fill=fill, font=font)
+        y += line_height
+    return y
 
 
 def render_week_position_chart(
