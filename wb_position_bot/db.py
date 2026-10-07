@@ -210,6 +210,37 @@ def disable_targets_for_owner(conn: sqlite3.Connection, owner_chat_id: int) -> N
     conn.commit()
 
 
+def transfer_targets_between_owners(
+    conn: sqlite3.Connection,
+    source_chat_id: int,
+    destination_chat_id: int,
+) -> int:
+    """Move every target to another user without changing target IDs or history."""
+
+    source = int(source_chat_id)
+    destination = int(destination_chat_id)
+    if source == destination:
+        raise ValueError("Источник и получатель должны быть разными пользователями.")
+
+    destination_count = conn.execute(
+        "select count(*) from tracked_products where owner_chat_id = ?",
+        (destination,),
+    ).fetchone()[0]
+    if destination_count:
+        raise ValueError("У получателя уже есть запросы.")
+
+    with conn:
+        cursor = conn.execute(
+            """
+            update tracked_products
+            set owner_chat_id = ?, updated_at = current_timestamp
+            where owner_chat_id = ?
+            """,
+            (destination, source),
+        )
+    return int(cursor.rowcount)
+
+
 def row_to_target(row: sqlite3.Row) -> ProductTarget:
     return ProductTarget(
         id=int(row["id"]),

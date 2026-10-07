@@ -41,6 +41,7 @@ from .db import (
     save_position_check,
     set_target_active,
     set_setting,
+    transfer_targets_between_owners,
     upsert_target,
 )
 from .models import ProductTarget
@@ -232,6 +233,7 @@ HELP_TEXT = """КАК РАБОТАЕТ БОТ
 ДОСТУП
 /invite — создать бессрочное приглашение для нового пользователя (только владелец)
 /users — показать подключенных пользователей (только владелец)
+/transferuser СТАРЫЙ_CHAT_ID НОВЫЙ_CHAT_ID — перенести все запросы пользователя (только владелец)
 /removeuser CHAT_ID — закрыть доступ пользователя (только владелец)
 
 /start — запустить бота
@@ -358,6 +360,71 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_send_message(context, chat_id, "Владелец закрыл доступ к боту.")
     except TelegramError:
         pass
+
+
+async def transfer_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_admin(update, context):
+        return
+    args = context.args or []
+    if len(args) != 2:
+        await update.effective_message.reply_text(
+            "Формат: /transferuser СТАРЫЙ_CHAT_ID НОВЫЙ_CHAT_ID. ID есть в /users."
+        )
+        return
+    try:
+        source_chat_id, destination_chat_id = (int(value) for value in args)
+    except ValueError:
+        await update.effective_message.reply_text("Оба CHAT_ID должны быть числами.")
+        return
+
+    admin_id = configured_admin_chat_id(context)
+    if source_chat_id == destination_chat_id:
+        await update.effective_message.reply_text("Источник и получатель должны быть разными пользователями.")
+        return
+    if admin_id in {source_chat_id, destination_chat_id}:
+        await update.effective_message.reply_text("Админские запросы этой командой не переносятся.")
+        return
+
+    conn = connect(db_path(context))
+    if not get_authorized_user(conn, source_chat_id):
+        await update.effective_message.reply_text("Исходный пользователь не найден среди подключенных.")
+        return
+    if not get_authorized_user(conn, destination_chat_id):
+        await update.effective_message.reply_text(
+            "Новый пользователь еще не подключен. Пусть сначала выполнит команду /start из приглашения."
+        )
+        return
+
+    source_targets = active_targets(conn, include_inactive=True, owner_chat_id=source_chat_id)
+    if not source_targets:
+        await update.effective_message.reply_text("У исходного пользователя нет запросов для переноса.")
+        return
+    if active_targets(conn, include_inactive=True, owner_chat_id=destination_chat_id):
+        await update.effective_message.reply_text(
+            "У нового пользователя уже есть запросы. Перенос остановлен, чтобы не создать дубликаты."
+        )
+        return
+
+    try:
+        moved = transfer_targets_between_owners(conn, source_chat_id, destination_chat_id)
+    except ValueError as error:
+        await update.effective_message.reply_text(str(error))
+        return
+
+    active_count = sum(target.active for target in source_targets)
+    await update.effective_message.reply_text(
+        f"Перенесено запросов: {moved} (активных: {active_count}).\n"
+        "История проверок и графики сохранены. Админские запросы не затронуты.\n"
+        f"Чтобы закрыть старому пользователю доступ, отправь: /removeuser {source_chat_id}"
+    )
+    for user_chat_id, text in (
+        (source_chat_id, "Владелец перенес ваши запросы другому пользователю. В этом чате они больше не доступны."),
+        (destination_chat_id, "Владелец перенес вам запросы. Их история и будущие автоотчеты уже доступны."),
+    ):
+        try:
+            await safe_send_message(context, user_chat_id, text)
+        except TelegramError:
+            pass
 
 
 async def audit_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1150,6 +1217,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("invite", invite_user))
     app.add_handler(CommandHandler("users", users_command))
+    app.add_handler(CommandHandler("transferuser", transfer_user))
     app.add_handler(CommandHandler("removeuser", remove_user))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("add", add))
