@@ -2,12 +2,36 @@ from __future__ import annotations
 
 import unittest
 import sqlite3
+import os
+import time
+from unittest.mock import patch
 
 from wb_position_bot.analyzer import analyze_target
-from wb_position_bot.db import connect, get_target_by_external_id, get_target_by_nm_id, migrate, upsert_target
+from wb_position_bot.config import get_config
+from wb_position_bot.db import (
+    active_authorized_users,
+    active_targets,
+    authorize_user,
+    claim_unowned_targets,
+    consume_member_invite,
+    connect,
+    create_member_invite,
+    get_authorized_user,
+    get_target_by_external_id,
+    get_target_by_nm_id,
+    migrate,
+    revoke_user,
+    transfer_targets_between_owners,
+    upsert_target,
+)
 from wb_position_bot.models import ProductTarget
 from wb_position_bot.target_parser import extract_yandex_product_id, parse_add_args
-from wb_position_bot.yandex_market import parse_yandex_search_html
+from wb_position_bot.yandex_market import (
+    YandexMarketClient,
+    YandexMarketError,
+    parse_apify_search_items,
+    parse_yandex_search_html,
+)
 
 
 SEARCH_HTML = r'''
@@ -25,6 +49,35 @@ SEARCH_HTML = r'''
 '''
 
 
+APIFY_ROWS = [
+    {
+        "searchPosition": 2,
+        "title": "Вторая карточка",
+        "modelId": 2002,
+        "marketSku": "900000002",
+        "oskuId": 4717385177,
+        "articleNumber": 4717385177,
+        "sellerName": "Кодерлайн",
+        "businessId": 77,
+        "price": 2590,
+        "rating": 4.9,
+        "reviewCount": 12,
+        "productUrl": "https://market.yandex.ru/card/programma/4717385177",
+    },
+    {
+        "searchPosition": 1,
+        "title": "Первая карточка",
+        "modelId": 1001,
+        "marketSku": "900000001",
+        "oskuId": 1111111111,
+        "sellerName": "Другой магазин",
+        "businessId": 88,
+        "price": 2999,
+        "productUrl": "https://market.yandex.ru/card/programma/1111111111",
+    },
+]
+
+
 class StaticClient:
     def __init__(self, items):
         self.items = items
@@ -34,6 +87,92 @@ class StaticClient:
 
 
 class YandexMarketTest(unittest.TestCase):
+    def test_apify_configuration_uses_one_batched_search(self):
+        with patch.dict(
+            os.environ,
+            {
+                "APIFY_API_TOKEN": "apify-test-key",
+                "YM_MAX_SEARCH_PAGES": "20",
+                "YM_APIFY_MAX_ITEMS": "50",
+            },
+            clear=True,
+        ):
+            config = get_config(require_telegram=False)
+
+        self.assertEqual(config.apify_api_token, "apify-test-key")
+        self.assertEqual(config.ym_max_search_pages, 1)
+        self.assertEqual(config.ym_apify_max_items, 50)
+        self.assertEqual(config.ym_check_timeout, 300.0)
+
+    def test_parses_apify_rows_in_search_order_and_keeps_all_ids(self):
+        items = parse_apify_search_items(APIFY_ROWS)
+
+        self.assertEqual([item.name for item in items], ["Первая карточка", "Вторая карточка"])
+        self.assertEqual(items[1].external_id, "4717385177")
+        self.assertIn("900000002", items[1].alternate_ids)
+        self.assertEqual(items[1].supplier_name, "Кодерлайн")
+        self.assertEqual(items[1].price, 2590)
+
+    def test_apify_search_is_cached_and_reports_position_limit(self):
+        client = YandexMarketClient(
+            apify_api_token="apify-test-key",
+            apify_max_items=50,
+        )
+        target = ProductTarget(
+            marketplace="ym",
+            external_id="4717385177",
+            search_query="1с бухгалтерия базовая",
+        )
+        with patch.object(client, "_post_apify_json", return_value=APIFY_ROWS) as request:
+            analysis = analyze_target(target, client, max_pages=1)
+            client.search(target.search_query, page=1)
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(analysis.own_position, 2)
+        self.assertEqual(analysis.search_scope, "среди первых 2 позиций выдачи")
+
+    def test_yandex_does_not_inherit_wildberries_proxy(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WB_PROXY_URL": "https://unblock.example:60000",
+                "WB_PROXY_AUTH_TOKEN": "wb-token",
+            },
+            clear=True,
+        ):
+            config = get_config(require_telegram=False)
+
+        self.assertEqual(config.ym_proxy_url, "")
+        self.assertEqual(config.ym_proxy_auth_token, "")
+        self.assertEqual(config.ym_request_timeout, 20.0)
+        self.assertEqual(config.ym_check_timeout, 120.0)
+        self.assertFalse(config.ym_enrich_sellers)
+
+    def test_yandex_operation_deadline_stops_long_check(self):
+        client = YandexMarketClient(timeout=5, retries=1, enrich_sellers=False)
+        client.start_operation(0.01)
+        time.sleep(0.02)
+
+        with self.assertRaisesRegex(YandexMarketError, "превысила допустимое время"):
+            client._remaining_time()
+
+        client.finish_operation()
+
+    def test_reef_configuration_caps_wb_search_at_three_pages(self):
+        with patch.dict(
+            os.environ,
+            {
+                "REEF_API_KEY": "reef-test-key",
+                "WB_MAX_SEARCH_PAGES": "20",
+            },
+            clear=True,
+        ):
+            config = get_config(require_telegram=False)
+
+        self.assertEqual(config.reef_api_key, "reef-test-key")
+        self.assertEqual(config.reef_country, "ru")
+        self.assertEqual(config.wb_max_search_pages, 3)
+
     def test_parses_search_cards_and_sellers(self):
         items = parse_yandex_search_html(SEARCH_HTML)
 
@@ -89,6 +228,190 @@ class YandexMarketTest(unittest.TestCase):
         self.assertNotEqual(wb.id, ym.id)
         self.assertEqual(get_target_by_nm_id(conn, 42).marketplace, "wb")
         self.assertEqual(get_target_by_external_id(conn, "ym", "42").marketplace, "ym")
+
+    def test_same_wb_card_can_track_multiple_queries(self):
+        conn = connect(":memory:")
+        first = upsert_target(
+            conn,
+            ProductTarget(
+                marketplace="wb",
+                external_id="42",
+                nm_id=42,
+                sku="42",
+                search_query="бухгалтерия",
+                own_supplier_name="Кодерлайн",
+            ),
+        )
+        second = upsert_target(
+            conn,
+            ProductTarget(
+                marketplace="wb",
+                external_id="42",
+                nm_id=42,
+                sku="42",
+                search_query="1С для Казахстана",
+                own_supplier_name="Кодерлайн",
+            ),
+        )
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(conn.execute("select count(*) from tracked_products").fetchone()[0], 2)
+
+    def test_same_yandex_card_can_track_multiple_queries(self):
+        conn = connect(":memory:")
+        first = upsert_target(
+            conn,
+            ProductTarget(
+                marketplace="ym",
+                external_id="998877",
+                sku="998877",
+                search_query="бухгалтерия",
+                own_supplier_name="Кодерлайн",
+            ),
+        )
+        second = upsert_target(
+            conn,
+            ProductTarget(
+                marketplace="ym",
+                external_id="998877",
+                sku="998877",
+                search_query="1С для Казахстана",
+                own_supplier_name="Кодерлайн",
+            ),
+        )
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(conn.execute("select count(*) from tracked_products").fetchone()[0], 2)
+
+    def test_readding_same_card_and_query_updates_existing_row(self):
+        conn = connect(":memory:")
+        first = upsert_target(
+            conn,
+            ProductTarget(
+                marketplace="wb",
+                external_id="42",
+                nm_id=42,
+                sku="42",
+                search_query="бухгалтерия",
+                own_supplier_name="Старое имя",
+            ),
+        )
+        updated = upsert_target(
+            conn,
+            ProductTarget(
+                marketplace="wb",
+                external_id="42",
+                nm_id=42,
+                sku="42",
+                search_query="бухгалтерия",
+                own_supplier_name="Кодерлайн",
+            ),
+        )
+
+        self.assertEqual(first.id, updated.id)
+        self.assertEqual(updated.own_supplier_name, "Кодерлайн")
+        self.assertEqual(conn.execute("select count(*) from tracked_products").fetchone()[0], 1)
+
+    def test_same_card_and_query_are_separate_for_each_user(self):
+        conn = connect(":memory:")
+        first = upsert_target(
+            conn,
+            ProductTarget(owner_chat_id=101, marketplace="wb", external_id="42", nm_id=42, search_query="test"),
+        )
+        second = upsert_target(
+            conn,
+            ProductTarget(owner_chat_id=202, marketplace="wb", external_id="42", nm_id=42, search_query="test"),
+        )
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual([item.id for item in active_targets(conn, owner_chat_id=101)], [first.id])
+        self.assertEqual([item.id for item in active_targets(conn, owner_chat_id=202)], [second.id])
+
+    def test_transfer_preserves_target_ids_and_position_history(self):
+        conn = connect(":memory:")
+        first = upsert_target(
+            conn,
+            ProductTarget(owner_chat_id=202, marketplace="wb", external_id="42", nm_id=42, search_query="первый"),
+        )
+        second = upsert_target(
+            conn,
+            ProductTarget(
+                owner_chat_id=202,
+                marketplace="ym",
+                external_id="103705469335",
+                search_query="второй",
+                active=False,
+            ),
+        )
+        admin_target = upsert_target(
+            conn,
+            ProductTarget(owner_chat_id=101, marketplace="wb", external_id="99", nm_id=99, search_query="админ"),
+        )
+        conn.execute(
+            "insert into position_checks(product_id, query, checked_at, top_json) values (?, ?, ?, ?)",
+            (first.id, "первый", "2026-10-07T09:00:00+03:00", "[]"),
+        )
+        conn.commit()
+
+        moved = transfer_targets_between_owners(conn, 202, 303)
+
+        self.assertEqual(moved, 2)
+        self.assertEqual(active_targets(conn, include_inactive=True, owner_chat_id=202), [])
+        self.assertEqual(
+            [target.id for target in active_targets(conn, include_inactive=True, owner_chat_id=303)],
+            [first.id, second.id],
+        )
+        self.assertEqual(conn.execute("select product_id from position_checks").fetchone()[0], first.id)
+        self.assertEqual(active_targets(conn, include_inactive=True, owner_chat_id=101)[0].id, admin_target.id)
+
+    def test_transfer_rejects_destination_with_existing_targets(self):
+        conn = connect(":memory:")
+        upsert_target(conn, ProductTarget(owner_chat_id=202, marketplace="wb", nm_id=42, search_query="источник"))
+        upsert_target(conn, ProductTarget(owner_chat_id=303, marketplace="wb", nm_id=43, search_query="получатель"))
+
+        with self.assertRaisesRegex(ValueError, "У получателя уже есть запросы"):
+            transfer_targets_between_owners(conn, 202, 303)
+
+    def test_authorized_user_and_legacy_target_migration(self):
+        conn = connect(":memory:")
+        legacy = upsert_target(conn, ProductTarget(nm_id=42, search_query="test"))
+        authorize_user(conn, 202, username="member", display_name="Member")
+        claim_unowned_targets(conn, 101)
+
+        self.assertEqual(active_targets(conn, owner_chat_id=101)[0].id, legacy.id)
+        self.assertEqual(get_authorized_user(conn, 202)["username"], "member")
+        self.assertEqual(len(active_authorized_users(conn)), 1)
+        self.assertTrue(revoke_user(conn, 202))
+        self.assertIsNone(get_authorized_user(conn, 202))
+
+    def test_multiple_invites_are_independent_and_never_expire(self):
+        conn = connect(":memory:")
+        create_member_invite(conn, "first-invite")
+        create_member_invite(conn, "second-invite")
+
+        self.assertTrue(consume_member_invite(conn, "first-invite", 202))
+        self.assertFalse(consume_member_invite(conn, "first-invite", 303))
+        self.assertTrue(consume_member_invite(conn, "second-invite", 303))
+
+    def test_invite_migration_preserves_existing_marketplace_data(self):
+        conn = connect(":memory:")
+        target = upsert_target(
+            conn,
+            ProductTarget(owner_chat_id=101, marketplace="wb", external_id="42", nm_id=42, search_query="test"),
+        )
+        authorize_user(conn, 202, username="member", display_name="Member")
+        conn.execute(
+            "insert into position_checks(product_id, query, checked_at, top_json) values (?, ?, ?, ?)",
+            (target.id, "test", "2026-09-30T09:00:00+03:00", "[]"),
+        )
+        conn.commit()
+
+        migrate(conn)
+
+        self.assertEqual(conn.execute("select count(*) from tracked_products").fetchone()[0], 1)
+        self.assertEqual(conn.execute("select count(*) from position_checks").fetchone()[0], 1)
+        self.assertEqual(len(active_authorized_users(conn)), 1)
+        self.assertEqual(conn.execute("select count(*) from member_invites").fetchone()[0], 0)
 
     def test_migrates_existing_wb_rows(self):
         conn = sqlite3.connect(":memory:")
